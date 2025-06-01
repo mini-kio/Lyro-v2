@@ -1,0 +1,34 @@
+# Core dependencies
+torch>=2.0.0
+torchaudio>=2.0.0
+numpy>=1.21.0
+
+# Audio processing
+librosa>=0.9.0
+soundfile>=0.12.0
+
+# Visualization
+matplotlib>=3.5.0
+
+# Utilities
+tqdm>=4.64.0
+pathlib2>=2.3.0
+
+# Training and optimization
+accelerate>=0.20.0
+transformers>=4.30.0
+
+# Experiment tracking (optional)
+wandb>=0.13.0
+
+# Development tools
+pytest>=7.0.0
+black>=22.0.0
+flake8>=5.0.0
+
+# Additional audio utilities
+resampy>=0.3.1
+scipy>=1.8.0
+
+# Memory optimization
+psutil>=5.9.0

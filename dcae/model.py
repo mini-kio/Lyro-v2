@@ -1128,8 +1128,7 @@ class MemoryOptimizedLyroMusicDCAE(nn.Module):
         
         # Combine segments
         latent = torch.cat(latent_segments, dim=-1)
-        
-        # Combine skip features
+          # Combine skip features
         combined_skip_features = []
         for layer_idx in range(len(skip_features_segments[0])):
             layer_features = [seg[layer_idx] for seg in skip_features_segments]
@@ -1142,11 +1141,31 @@ class MemoryOptimizedLyroMusicDCAE(nn.Module):
         """Implementation of encoding"""
         latent, skip_features = self.encoder(audio)
         
-        # Apply dual-channel weighting
+        # Apply dual-channel weighting - dynamically handle different latent channel counts
         if self.dual_channel_processing:
-            vocal_channels = latent[:, :4] * self.vocal_weight.view(1, 4, 1)
-            inst_channels = latent[:, 4:] * self.inst_weight.view(1, 4, 1)
-            latent = torch.cat([vocal_channels, inst_channels], dim=1)
+            # For latent_channels that are not divisible by 2, only apply weighting to available channels
+            if self.latent_channels >= 8:
+                # Standard case: 8+ channels, split 4+4
+                vocal_channels = latent[:, :4] * self.vocal_weight.view(1, 4, 1)
+                inst_channels = latent[:, 4:8] * self.inst_weight.view(1, 4, 1)
+                # Keep remaining channels unchanged
+                if self.latent_channels > 8:
+                    remaining_channels = latent[:, 8:]
+                    latent = torch.cat([vocal_channels, inst_channels, remaining_channels], dim=1)
+                else:
+                    latent = torch.cat([vocal_channels, inst_channels], dim=1)
+            elif self.latent_channels == 6:
+                # Small model case: 6 channels, split 3+3
+                half_channels = self.latent_channels // 2
+                vocal_weight_adjusted = self.vocal_weight[:half_channels].view(1, half_channels, 1)
+                inst_weight_adjusted = self.inst_weight[:half_channels].view(1, half_channels, 1)
+                
+                vocal_channels = latent[:, :half_channels] * vocal_weight_adjusted
+                inst_channels = latent[:, half_channels:] * inst_weight_adjusted
+                latent = torch.cat([vocal_channels, inst_channels], dim=1)
+            else:
+                # For other cases, apply simple uniform weighting
+                pass  # Keep latent unchanged
         
         return latent, skip_features
     
@@ -1243,8 +1262,7 @@ class MemoryOptimizedLyroMusicDCAE(nn.Module):
             
             # Time domain loss
             time_loss = F.l1_loss(reconstructed, audio)
-            
-            # Total loss
+              # Total loss
             total_loss = stft_loss + 0.1 * time_loss + 0.02 * vq_loss
             
             loss_dict = {
@@ -1263,8 +1281,16 @@ class MemoryOptimizedLyroMusicDCAE(nn.Module):
         latent: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Separate vocal and instrumental latent channels"""
-        vocal_latent = latent[:, :4]
-        inst_latent = latent[:, 4:]
+        if self.latent_channels >= 8:
+            # Standard case: split into 4+4 channels
+            vocal_latent = latent[:, :4]
+            inst_latent = latent[:, 4:8]
+        else:
+            # For smaller models, split evenly
+            half_channels = self.latent_channels // 2
+            vocal_latent = latent[:, :half_channels]
+            inst_latent = latent[:, half_channels:half_channels*2]
+        
         return vocal_latent, inst_latent
     
     def encode_with_separation(
