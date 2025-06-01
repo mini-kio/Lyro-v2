@@ -11,7 +11,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-import wandb
 from tqdm import tqdm
 import numpy as np
 from pathlib import Path
@@ -19,6 +18,31 @@ import json
 from typing import Dict, Optional, List
 import math
 import torchaudio  # ✅ 추가: 누락된 import
+
+# Wandb import handling
+WANDB_AVAILABLE = False
+wandb = None
+
+try:
+    # Use importlib to avoid static analysis issues
+    import importlib
+    _wandb = importlib.import_module('wandb')
+    WANDB_AVAILABLE = True
+    wandb = _wandb
+except ImportError:
+    # Create a mock wandb class to avoid undefined variable errors
+    class MockWandb:
+        @staticmethod
+        def init(*args, **kwargs):
+            pass
+        @staticmethod
+        def log(*args, **kwargs):
+            pass
+        class Audio:
+            def __init__(self, *args, **kwargs):
+                pass
+    wandb = MockWandb()
+    print("Warning: wandb not available. Using mock logging.")
 
 # LYRO 모듈 임포트
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -65,14 +89,15 @@ class LyroTrainer:
         # 체크포인트 디렉토리
         self.checkpoint_dir = Path(args.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Wandb 초기화
-        if args.use_wandb:
+          # Wandb 초기화
+        if args.use_wandb and WANDB_AVAILABLE:
             wandb.init(
                 project="lyro-ssm",
                 name=f"{args.exp_name}_stage_{args.stage}",
                 config=vars(args)
             )
+        elif args.use_wandb and not WANDB_AVAILABLE:
+            print("Warning: wandb requested but not available. Continuing without logging.")
             
         # Adaptive Weight Manager (Stage C 이상)
         if self.stage in ['C', 'D', 'E']:
@@ -326,9 +351,8 @@ class LyroTrainer:
                     'grad_norm': f'{grad_norm:.4f}',
                     'lr': f'{self.optimizer.param_groups[0]["lr"]:.2e}'
                 })
-                
-                # Wandb 로깅
-                if self.args.use_wandb and batch_idx % self.args.log_interval == 0:
+                  # Wandb 로깅
+                if self.args.use_wandb and WANDB_AVAILABLE and batch_idx % self.args.log_interval == 0:
                     log_dict = {
                         'train/loss': loss.item(),
                         'train/grad_norm': grad_norm,
@@ -485,9 +509,8 @@ class LyroTrainer:
                 task_avg_losses[task] = task_losses[task] / task_counts[task]
             else:
                 task_avg_losses[task] = 0.0
-                
-        # Wandb 로깅
-        if self.args.use_wandb:
+                  # Wandb 로깅
+        if self.args.use_wandb and WANDB_AVAILABLE:
             log_dict = {
                 'val/loss': avg_loss,
                 'epoch': epoch
@@ -566,9 +589,8 @@ class LyroTrainer:
                         sample['audio'][0],
                         sample_rate=44100
                     )
-                    
-                    # Wandb 로깅
-                    if self.args.use_wandb:
+                      # Wandb 로깅
+                    if self.args.use_wandb and WANDB_AVAILABLE:
                         wandb.log({
                             f'samples/{sample["task"]}_{i}': wandb.Audio(
                                 sample['audio'][0].numpy(),

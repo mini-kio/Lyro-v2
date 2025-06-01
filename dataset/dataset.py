@@ -1,7 +1,7 @@
 # lyro/dataset/dataset.py
 """
-Enhanced LYRO Dataset Implementation with Advanced Augmentation
-T-1: Mix-scale Augmentation Integration
+Enhanced LYRO Dataset Implementation with TTS Support
+T-1: Mix-scale Augmentation Integration + TTS Data Support
 """
 
 import os
@@ -31,9 +31,9 @@ except ImportError:
 
 class LyroDataset(Dataset):
     """
-    Enhanced LYRO 메인 데이터셋 클래스 with advanced augmentation
+    Enhanced LYRO 메인 데이터셋 클래스 with TTS support and advanced augmentation
     
-    메타데이터를 읽어서 오디오, 가사, 스타일 정보를 로드하고
+    메타데이터를 읽어서 오디오, 가사, TTS, 스타일 정보를 로드하고
     학습에 필요한 형태로 전처리하며, 고급 데이터 증강을 적용합니다.
     """
     
@@ -46,6 +46,8 @@ class LyroDataset(Dataset):
         task_ratios: Dict[str, float] = None,
         augmentation: bool = True,
         use_processed: bool = True,
+        use_tts: bool = True,  # TTS 사용 여부
+        tts_ratio: float = 0.3,  # TTS 데이터 사용 비율
         # T-1: Enhanced Augmentation Parameters
         augmentation_config: Optional[Dict] = None
     ):
@@ -58,6 +60,8 @@ class LyroDataset(Dataset):
             task_ratios: 태스크별 샘플링 비율
             augmentation: 데이터 증강 여부
             use_processed: 전처리된 데이터 사용 여부
+            use_tts: TTS 데이터 사용 여부
+            tts_ratio: TTS 데이터 사용 비율
             augmentation_config: 증강 설정 (T-1)
         """
         self.metadata_path = Path(metadata_path)
@@ -66,12 +70,15 @@ class LyroDataset(Dataset):
         self.max_duration = max_duration
         self.augmentation = augmentation
         self.use_processed = use_processed
+        self.use_tts = use_tts
+        self.tts_ratio = tts_ratio
         
-        # 기본 태스크 비율 설정
+        # 기본 태스크 비율 설정 (TTS 추가)
         self.task_ratios = task_ratios or {
-            'SONG': 0.70,
+            'SONG': 0.50,
             'INST': 0.15,
-            'COVER': 0.15
+            'COVER': 0.15,
+            'TTS': 0.20  # TTS 태스크 추가
         }
         
         # 메타데이터 로드
@@ -158,15 +165,30 @@ class LyroDataset(Dataset):
     
     def _validate_paths(self, item: Dict) -> bool:
         """파일 경로 존재 여부 검증"""
+        # 기본 오디오 파일 체크
         audio_path = self.dataset_root / item['audio_path']
         if not audio_path.exists():
             return False
             
+        # 가사 파일 체크 (선택적)
         if item.get('lyric_path'):
             lyric_path = self.dataset_root / item['lyric_path']
             if not lyric_path.exists():
                 return False
-                
+        
+        # TTS 관련 파일 체크 (선택적)        
+        if self.use_tts and item.get('has_tts', False):
+            if item.get('tts_audio_path'):
+                tts_audio_path = self.dataset_root / item['tts_audio_path']
+                if not tts_audio_path.exists():
+                    print(f"Warning: TTS audio not found: {tts_audio_path}")
+                    # TTS 파일이 없어도 일단 유효한 것으로 처리
+                    
+            if item.get('transcript_path'):
+                transcript_path = self.dataset_root / item['transcript_path']
+                if not transcript_path.exists():
+                    print(f"Warning: Transcript not found: {transcript_path}")
+                    
         return True
     
     def _organize_by_task(self) -> Dict[str, List[int]]:
@@ -174,10 +196,18 @@ class LyroDataset(Dataset):
         task_indices = {
             'SONG': [],
             'INST': [],
-            'COVER': []
+            'COVER': [],
+            'TTS': []  # TTS 태스크 추가
         }
         
         for idx, item in enumerate(self.items):
+            # TTS 데이터가 있는 경우 TTS 태스크로 분류
+            if (self.use_tts and 
+                item.get('has_tts', False) and 
+                item.get('tts_audio_path') and 
+                item.get('transcript_path')):
+                task_indices['TTS'].append(idx)
+                
             # 가사가 있으면 SONG 태스크
             if item.get('lyric_path'):
                 task_indices['SONG'].append(idx)
@@ -200,12 +230,13 @@ class LyroDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Dict:
         """
-        데이터 로드 및 전처리 with enhanced augmentation
+        데이터 로드 및 전처리 with enhanced augmentation and TTS support
         
         Returns:
             Dict containing:
                 - audio: (2, T) 스테레오 오디오
                 - lyrics: 가사 텍스트 (optional)
+                - transcript: TTS 전사본 (optional for TTS task)
                 - genre: 장르 리스트
                 - task_token: 태스크 타입
                 - metadata: 원본 메타데이터
@@ -216,6 +247,9 @@ class LyroDataset(Dataset):
         if task == 'COVER':
             # COVER 태스크는 참조 오디오도 필요
             return self._get_cover_item(idx)
+        elif task == 'TTS':
+            # TTS 태스크 처리
+            return self._get_tts_item(idx)
         else:
             # SONG 또는 INST 태스크
             if task in self.task_indices and self.task_indices[task]:
@@ -290,11 +324,105 @@ class LyroDataset(Dataset):
         return {
             'audio': audio_tensor,
             'lyrics': lyrics,
+            'transcript': None,  # TTS 태스크가 아니므로 None
             'genre': genre,
             'task_token': f'<TASK={task}>',
             'metadata': item,
             'audio_length': audio_tensor.shape[1]
         }
+    
+    def _get_tts_item(self, idx: int) -> Dict:
+        """TTS 태스크용 데이터 준비"""
+        # TTS 데이터가 있는 항목 선택
+        if 'TTS' in self.task_indices and self.task_indices['TTS']:
+            tts_idx = random.choice(self.task_indices['TTS'])
+            item = self.items[tts_idx]
+        else:
+            # TTS 데이터가 없으면 일반 데이터를 TTS처럼 처리
+            print("Warning: No TTS data available, using regular data")
+            item = self.items[idx]
+            
+        # TTS 오디오 로드
+        tts_audio_path = None
+        if item.get('tts_audio_path'):
+            tts_audio_path = self.dataset_root / item['tts_audio_path']
+            
+        # TTS 오디오가 있으면 사용, 없으면 원본 오디오 사용
+        if tts_audio_path and tts_audio_path.exists():
+            audio_path = tts_audio_path
+        else:
+            audio_path = self.dataset_root / item['audio_path']
+            
+        try:
+            audio, sr = librosa.load(str(audio_path), sr=self.sample_rate, mono=False)
+        except Exception as e:
+            print(f"Error loading TTS audio {audio_path}: {e}")
+            # 더미 오디오 반환
+            audio = np.zeros((2, int(self.sample_rate * 1.0)))
+            
+        # 스테레오로 변환
+        if audio.ndim == 1:
+            audio = np.stack([audio, audio], axis=0)
+        elif audio.shape[0] > 2:
+            audio = audio[:2]
+            
+        # 길이 제한
+        max_samples = int(self.max_duration * self.sample_rate)
+        if audio.shape[1] > max_samples:
+            start = random.randint(0, audio.shape[1] - max_samples)
+            audio = audio[:, start:start + max_samples]
+            
+        # 전사본 로드
+        transcript = None
+        if item.get('transcript_path'):
+            transcript_path = self.dataset_root / item['transcript_path']
+            try:
+                with open(transcript_path, 'r', encoding='utf-8') as f:
+                    transcript = f.read().strip()
+            except Exception as e:
+                print(f"Error loading transcript {transcript_path}: {e}")
+                transcript = ""
+        
+        # 장르 정보
+        genre = item.get('genre', ['TTS'])  # TTS 기본 장르
+        if isinstance(genre, str):
+            genre = [genre]
+            
+        # Convert to tensor
+        audio_tensor = torch.from_numpy(audio).float()
+        
+        # TTS에는 다른 증강 전략 적용 (더 보수적)
+        if self.augmentation and self.training:
+            audio_tensor = self._apply_tts_augmentation(audio_tensor)
+            
+        return {
+            'audio': audio_tensor,
+            'lyrics': None,  # TTS는 가사 대신 전사본 사용
+            'transcript': transcript,
+            'genre': genre,
+            'task_token': '<TASK=TTS>',
+            'metadata': item,
+            'audio_length': audio_tensor.shape[1]
+        }
+    
+    def _apply_tts_augmentation(self, audio: torch.Tensor) -> torch.Tensor:
+        """TTS용 보수적 증강 적용"""
+        # TTS는 말하기 데이터이므로 음악보다 보수적으로 증강
+        if self.quick_augmentations:
+            for aug_name, aug_func in self.quick_augmentations.items():
+                if aug_name in ['polarity_invert', 'dc_offset'] and random.random() < 0.1:
+                    try:
+                        audio = aug_func(audio)
+                    except Exception as e:
+                        print(f"Warning: TTS augmentation {aug_name} failed: {e}")
+                        continue
+        
+        # 간단한 노이즈만 추가
+        if random.random() < 0.3:
+            noise = torch.randn_like(audio) * 0.002  # 매우 작은 노이즈
+            audio = audio + noise
+            
+        return audio
     
     def _apply_enhanced_augmentation(self, audio: torch.Tensor) -> torch.Tensor:
         """
@@ -375,6 +503,7 @@ class LyroDataset(Dataset):
             'reference_audio': source_data['audio'],  # 참조 오디오
             'reference_length': ref_length,
             'lyrics': target_data['lyrics'],
+            'transcript': None,
             'genre': source_data['genre'],  # 원본 스타일 유지
             'task_token': '<TASK=COVER>',
             'metadata': {
@@ -404,6 +533,8 @@ class LyroDataset(Dataset):
         stats = {
             "augmentation_enabled": True,
             "augmentation_available": AUGMENTATION_AVAILABLE,
+            "use_tts": self.use_tts,
+            "tts_ratio": self.tts_ratio,
         }
         
         if AUGMENTATION_AVAILABLE and self.mix_scale_augmentation:
@@ -419,11 +550,15 @@ class LyroDataset(Dataset):
             stats["quick_augmentations"] = len(self.quick_augmentations)
             
         return stats
+    
+    def get_task_distribution(self) -> Dict[str, int]:
+        """태스크별 데이터 분포 반환"""
+        return {task: len(indices) for task, indices in self.task_indices.items()}
 
 
 class LyroCollator:
     """
-    Enhanced 배치 데이터 정리를 위한 Collator
+    Enhanced 배치 데이터 정리를 위한 Collator with TTS support
     
     가변 길이 오디오와 텍스트를 패딩하고
     배치 형태로 정리합니다.
@@ -465,7 +600,7 @@ class LyroCollator:
         return mixed_batch
         
     def __call__(self, batch: List[Dict]) -> Dict:
-        """배치 데이터 정리 with enhanced processing"""
+        """배치 데이터 정리 with enhanced processing and TTS support"""
         # 오디오 패딩
         audio_lengths = [item['audio'].shape[1] for item in batch]
         max_len = max(audio_lengths) if not self.max_audio_length else \
@@ -501,6 +636,15 @@ class LyroCollator:
                 lyrics_list, 
                 max_length=self.max_text_length
             )
+        
+        # TTS 전사본 토큰화
+        transcript_tokens = None
+        if self.tokenizer and any(item.get('transcript') for item in batch):
+            transcript_list = [item.get('transcript', '') for item in batch]
+            transcript_tokens = self.tokenizer.batch_encode(
+                transcript_list,
+                max_length=self.max_text_length
+            )
             
         # 배치 구성
         batch_dict = {
@@ -512,6 +656,9 @@ class LyroCollator:
         
         if lyrics_tokens is not None:
             batch_dict['lyrics_tokens'] = lyrics_tokens
+            
+        if transcript_tokens is not None:
+            batch_dict['transcript_tokens'] = transcript_tokens
             
         # COVER 태스크 처리
         if any('reference_audio' in item for item in batch):

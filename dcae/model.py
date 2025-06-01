@@ -1,251 +1,486 @@
 # lyro/dcae/model.py
 """
-Enhanced Lyro Music DCAE Implementation
-Improvements: FIR Low-pass, Weight Norm, Extended STFT, Enhanced Skip Connections
+SSM-based LYRO DCAE Implementation with Memory Optimization - ENHANCED VERSION
+State Space Model based Diffusion ConvNet AutoEncoder for high-quality audio compression
+Enhanced with chunked processing and expanded gradient checkpointing
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as checkpoint
 import torchaudio
+import torchaudio.functional as F_audio
 import numpy as np
 from typing import Tuple, Optional, List, Dict, Union
 import math
 from pathlib import Path
 
+# Import SSM components from SSM module
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ==================== Enhanced Advanced Convolution Blocks ====================
-
-class AdvancedLayerNorm(nn.Module):
-    """Advanced layer normalization supporting multiple data formats"""
-    
-    def __init__(self, normalized_shape, eps=1e-6, data_format="channels_last"):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(normalized_shape))
-        self.bias = nn.Parameter(torch.zeros(normalized_shape))
-        self.eps = eps
-        self.data_format = data_format
-        self.normalized_shape = (normalized_shape,)
-
-    def forward(self, x):
-        if self.data_format == "channels_last":
-            return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
-        elif self.data_format == "channels_first":
-            u = x.mean(1, keepdim=True)
-            s = (x - u).pow(2).mean(1, keepdim=True)
-            x = (x - u) / torch.sqrt(s + self.eps)
-            x = self.weight[:, None] * x + self.bias[:, None]
-            return x
+from ssm.model import MultiScaleSSM, SinusoidalEmbedding
 
 
-class ResidualBlock1D(nn.Module):
-    """Advanced residual block for 1D convolutions with Weight Norm"""
-    
-    def __init__(
-        self, 
-        channels: int, 
-        kernel_size: int = 3, 
-        dilation: int = 1,
-        dropout: float = 0.1,
-        activation: str = "swish",
-        use_weight_norm: bool = True  # T-2: Weight Normalization
-    ):
-        super().__init__()
-        
-        padding = (kernel_size * dilation - dilation) // 2
-        
-        # T-2: Apply Weight Normalization to Conv layers
-        conv1 = nn.Conv1d(channels, channels, kernel_size, 
-                         dilation=dilation, padding=padding)
-        conv2 = nn.Conv1d(channels, channels, kernel_size,
-                         dilation=dilation, padding=padding)
-        
-        if use_weight_norm:
-            conv1 = nn.utils.weight_norm(conv1)
-            conv2 = nn.utils.weight_norm(conv2)
-        
-        self.conv1 = conv1
-        self.norm1 = nn.GroupNorm(min(32, channels//4), channels)
-        
-        self.conv2 = conv2
-        self.norm2 = nn.GroupNorm(min(32, channels//4), channels)
-        
-        self.dropout = nn.Dropout(dropout)
-        
-        if activation == "swish":
-            self.activation = nn.SiLU()
-        elif activation == "gelu":
-            self.activation = nn.GELU()
-        else:
-            self.activation = nn.ReLU()
-        
-    def forward(self, x):
-        residual = x
-        
-        x = self.conv1(x)
-        x = self.norm1(x)
-        x = self.activation(x)
-        x = self.dropout(x)
-        
-        x = self.conv2(x)
-        x = self.norm2(x)
-        
-        x = x + residual
-        x = self.activation(x)
-        
-        return x
+# ==================== Memory-Optimized State Space Kernel ====================
 
-
-class MultiScaleConv1D(nn.Module):
-    """Multi-scale convolution for better feature extraction with Weight Norm"""
+class MemoryOptimizedStateSpaceKernel(nn.Module):
+    """
+    Memory-Optimized State Space Model Kernel with chunked processing
+    """
     
     def __init__(
         self,
-        in_channels: int,
-        out_channels: int,
-        kernel_sizes: List[int] = [3, 7, 11],
-        stride: int = 1,
-        padding_mode: str = "reflect",
-        use_weight_norm: bool = True  # T-2: Weight Normalization
+        d_model: int,
+        d_state: int = 64,
+        d_conv: int = 4,
+        expand: int = 2,
+        dt_rank: Optional[int] = None,
+        dt_min: float = 0.001,
+        dt_max: float = 0.1,
+        dt_init: str = "random",
+        dt_scale: float = 1.0,
+        bias: bool = True,
+        conv_bias: bool = True,
+        # Memory optimization parameters
+        chunk_size: int = 1024,  # Process in chunks to reduce memory
+        use_checkpointing: bool = True,
+        memory_efficient: bool = True,
     ):
         super().__init__()
         
-        self.convs = nn.ModuleList()
-        branch_channels = out_channels // len(kernel_sizes)
+        self.d_model = d_model
+        self.d_state = d_state
+        self.d_conv = d_conv
+        self.expand = expand
+        self.d_inner = d_model * expand
+        self.chunk_size = chunk_size
+        self.use_checkpointing = use_checkpointing
+        self.memory_efficient = memory_efficient
         
-        for kernel_size in kernel_sizes:
-            padding = kernel_size // 2
-            conv = nn.Conv1d(in_channels, branch_channels, kernel_size,
-                           stride=stride, padding=padding, padding_mode=padding_mode)
-            
-            # T-2: Apply Weight Normalization
-            if use_weight_norm:
-                conv = nn.utils.weight_norm(conv)
-            
-            self.convs.append(nn.Sequential(
-                conv,
-                nn.GroupNorm(min(8, branch_channels//4), branch_channels),
-                nn.SiLU()
-            ))
+        dt_rank = dt_rank or math.ceil(d_model / 16)
         
-        # Adjust final channel count
-        total_branch_channels = branch_channels * len(kernel_sizes)
-        channel_adjust = nn.Conv1d(total_branch_channels, out_channels, 1)
+        # Input projections
+        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=bias)
         
-        if use_weight_norm:
-            channel_adjust = nn.utils.weight_norm(channel_adjust)
-        
-        self.channel_adjust = channel_adjust if total_branch_channels != out_channels else nn.Identity()
-    
-    def forward(self, x):
-        branch_outputs = [conv(x) for conv in self.convs]
-        combined = torch.cat(branch_outputs, dim=1)
-        return self.channel_adjust(combined)
-
-
-class AttentionBlock1D(nn.Module):
-    """Self-attention block for 1D sequences"""
-    
-    def __init__(self, channels: int, num_heads: int = 8):
-        super().__init__()
-        self.channels = channels
-        self.num_heads = num_heads
-        
-        self.norm = nn.GroupNorm(min(32, channels//4), channels)
-        self.attention = nn.MultiheadAttention(
-            embed_dim=channels,
-            num_heads=num_heads,
-            batch_first=True
+        # Convolution
+        self.conv1d = nn.Conv1d(
+            in_channels=self.d_inner,
+            out_channels=self.d_inner,
+            bias=conv_bias,
+            kernel_size=d_conv,
+            groups=self.d_inner,
+            padding=d_conv - 1,
         )
         
-    def forward(self, x):
-        B, C, T = x.shape
+        # SSM parameters
+        self.x_proj = nn.Linear(self.d_inner, dt_rank + d_state * 2, bias=False)
+        self.dt_proj = nn.Linear(dt_rank, self.d_inner, bias=True)
+        
+        # Initialize dt projection
+        dt_init_std = dt_rank**-0.5 * dt_scale
+        if dt_init == "constant":
+            nn.init.constant_(self.dt_proj.weight, dt_init_std)
+        elif dt_init == "random":
+            nn.init.uniform_(self.dt_proj.weight, -dt_init_std, dt_init_std)
+        
+        # Initialize dt bias
+        dt = torch.exp(
+            torch.rand(self.d_inner) * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min)
+        ).clamp(min=dt_min)
+        inv_dt = dt + torch.log(-torch.expm1(-dt))
+        with torch.no_grad():
+            self.dt_proj.bias.copy_(inv_dt)
+        self.dt_proj.bias._no_reinit = True
+        
+        # S4D real initialization
+        A = torch.arange(1, d_state + 1, dtype=torch.float32).repeat(self.d_inner, 1)
+        self.A_log = nn.Parameter(torch.log(A))
+        self.A_log._no_weight_decay = True
+        
+        # D skip connection
+        self.D = nn.Parameter(torch.ones(self.d_inner))
+        self.D._no_weight_decay = True
+        
+        # Output projection
+        self.out_proj = nn.Linear(self.d_inner, d_model, bias=bias)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Memory-optimized forward pass with chunked processing and checkpointing
+        
+        Args:
+            x: (B, L, D) input sequence
+        Returns:
+            output: (B, L, D) processed sequence
+        """
+        B, L, D = x.shape
+        
+        # Apply checkpointing to reduce memory
+        if self.use_checkpointing and self.training:
+            return checkpoint.checkpoint(self._forward_impl, x, use_reentrant=False)
+        else:
+            return self._forward_impl(x)
+    
+    def _forward_impl(self, x: torch.Tensor) -> torch.Tensor:
+        """Implementation with memory optimization"""
+        B, L, D = x.shape
+        
+        # Input projection and split
+        xz = self.in_proj(x)  # (B, L, 2*d_inner)
+        x, z = xz.chunk(2, dim=-1)  # Each: (B, L, d_inner)
+        
+        # Convolution (causal)
+        x = x.transpose(1, 2)  # (B, d_inner, L)
+        x = self.conv1d(x)[..., :L]  # Truncate to original length
+        x = x.transpose(1, 2)  # (B, L, d_inner)
+        
+        # Activation
+        x = F.silu(x)
+        
+        # Memory-optimized SSM computation
+        if self.memory_efficient and L > self.chunk_size:
+            x = self._chunked_ssm(x)
+        else:
+            x = self.ssm(x)
+        
+        # Gating
+        y = x * F.silu(z)
+        
+        # Output projection
+        output = self.out_proj(y)
+        
+        return output
+    
+    def _chunked_ssm(self, x: torch.Tensor) -> torch.Tensor:
+        """Process SSM in chunks to reduce peak memory"""
+        B, L, D = x.shape
+        
+        # Split into chunks
+        chunks = []
+        for start in range(0, L, self.chunk_size):
+            end = min(start + self.chunk_size, L)
+            chunk = x[:, start:end]
+            
+            # Process chunk
+            processed_chunk = self.ssm(chunk)
+            chunks.append(processed_chunk)
+        
+        # Concatenate results
+        return torch.cat(chunks, dim=1)
+    
+    def ssm(self, x: torch.Tensor) -> torch.Tensor:
+        """Core SSM computation with memory-optimized discretization"""
+        B, L, D = x.shape
+        
+        # Compute dt, B, C
+        x_dbl = self.x_proj(x)  # (B, L, dt_rank + 2*d_state)
+        dt, B, C = torch.split(x_dbl, [self.dt_proj.in_features, self.d_state, self.d_state], dim=-1)
+        
+        # Compute dt
+        dt = self.dt_proj(dt)  # (B, L, d_inner)
+        dt = F.softplus(dt + self.dt_proj.bias)
+        
+        # Compute A
+        A = -torch.exp(self.A_log.float())  # (d_inner, d_state)
+        
+        # Memory-optimized discretization
+        A_discrete, B_discrete = self.memory_efficient_discretize(A, B, dt)
+        
+        # SSM step
+        y = self.ssm_step(x, A_discrete, B_discrete, C, self.D)
+        
+        return y
+    
+    def memory_efficient_discretize(self, A, B, dt):
+        """
+        Memory-optimized discretization with chunked processing
+        
+        Args:
+            A: (d_inner, d_state)
+            B: (B, L, d_state) 
+            dt: (B, L, d_inner)
+        """
+        B_batch, L, _ = dt.shape
+        
+        # Expand dt for broadcasting
+        dt = dt.unsqueeze(-1)  # (B, L, d_inner, 1)
+        A = A.unsqueeze(0).unsqueeze(0)  # (1, 1, d_inner, d_state)
+        
+        # Process in chunks to reduce memory usage
+        chunk_size = min(self.chunk_size, L)
+        
+        A_discrete_chunks = []
+        B_discrete_chunks = []
+        
+        for start in range(0, L, chunk_size):
+            end = min(start + chunk_size, L)
+            
+            # Chunk data
+            dt_chunk = dt[:, start:end]  # (B, chunk_size, d_inner, 1)
+            B_chunk = B[:, start:end]    # (B, chunk_size, d_state)
+            
+            # Zero-order hold discretization for chunk
+            # Use torch.clamp to prevent overflow
+            dt_A = torch.clamp(dt_chunk * A, min=-10, max=10)
+            A_discrete_chunk = torch.exp(dt_A)  # (B, chunk_size, d_inner, d_state)
+            
+            # Compute B_discrete more efficiently
+            # B_discrete = (A_discrete - 1) / A * B
+            # Use numerically stable computation
+            with torch.no_grad():
+                # For small dt_A, use Taylor expansion: exp(x) - 1 ≈ x + x²/2
+                small_mask = torch.abs(dt_A) < 0.1
+            
+            B_discrete_chunk = torch.where(
+                small_mask,
+                # Taylor expansion for numerical stability
+                dt_chunk * (1 + 0.5 * dt_A) * B_chunk.unsqueeze(2),
+                # Standard computation
+                (A_discrete_chunk - 1) / (dt_A + 1e-8) * B_chunk.unsqueeze(2)
+            )
+            
+            A_discrete_chunks.append(A_discrete_chunk)
+            B_discrete_chunks.append(B_discrete_chunk)
+            
+            # Clear intermediate tensors
+            del dt_chunk, B_chunk, dt_A, A_discrete_chunk, B_discrete_chunk
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        # Concatenate chunks
+        A_discrete = torch.cat(A_discrete_chunks, dim=1)
+        B_discrete = torch.cat(B_discrete_chunks, dim=1)
+        
+        return A_discrete, B_discrete
+    
+    def ssm_step(self, x, A, B, C, D):
+        """Perform SSM recurrence with memory optimization"""
+        B_batch, L, d_inner = x.shape
+        d_state = A.shape[-1]
+        
+        # Process in chunks if sequence is too long
+        if L > self.chunk_size and self.memory_efficient:
+            return self._chunked_ssm_step(x, A, B, C, D)
+        
+        # Initialize state
+        h = torch.zeros(B_batch, d_inner, d_state, device=x.device, dtype=x.dtype)
+        
+        outputs = []
+        
+        for t in range(L):
+            # Current inputs
+            x_t = x[:, t]  # (B, d_inner)
+            A_t = A[:, t]  # (B, d_inner, d_state)
+            B_t = B[:, t]  # (B, d_inner, d_state)
+            C_t = C[:, t]  # (B, d_state)
+            
+            # State update
+            h = A_t * h + B_t * x_t.unsqueeze(-1)
+            
+            # Output
+            y_t = torch.sum(h * C_t.unsqueeze(1), dim=-1) + D * x_t
+            outputs.append(y_t)
+        
+        y = torch.stack(outputs, dim=1)  # (B, L, d_inner)
+        
+        return y
+    
+    def _chunked_ssm_step(self, x, A, B, C, D):
+        """Process SSM step in chunks for memory efficiency"""
+        B_batch, L, d_inner = x.shape
+        d_state = A.shape[-1]
+        
+        # Initialize state
+        h = torch.zeros(B_batch, d_inner, d_state, device=x.device, dtype=x.dtype)
+        
+        outputs = []
+        
+        # Process in chunks
+        for start in range(0, L, self.chunk_size):
+            end = min(start + self.chunk_size, L)
+            
+            chunk_outputs = []
+            
+            for t in range(start, end):
+                # Current inputs
+                x_t = x[:, t]
+                A_t = A[:, t]
+                B_t = B[:, t]
+                C_t = C[:, t]
+                
+                # State update
+                h = A_t * h + B_t * x_t.unsqueeze(-1)
+                
+                # Output
+                y_t = torch.sum(h * C_t.unsqueeze(1), dim=-1) + D * x_t
+                chunk_outputs.append(y_t)
+            
+            outputs.extend(chunk_outputs)
+        
+        y = torch.stack(outputs, dim=1)
+        return y
+
+
+class CheckpointedSSMBlock(nn.Module):
+    """SSM Block with enhanced gradient checkpointing"""
+    
+    def __init__(
+        self,
+        d_model: int,
+        d_state: int = 64,
+        d_conv: int = 4,
+        expand: int = 2,
+        dropout: float = 0.1,
+        layer_norm_eps: float = 1e-5,
+        chunk_size: int = 1024,
+        use_checkpointing: bool = True,
+        memory_efficient: bool = True,
+    ):
+        super().__init__()
+        
+        self.use_checkpointing = use_checkpointing
+        
+        self.ssm = MemoryOptimizedStateSpaceKernel(
+            d_model=d_model,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=expand,
+            chunk_size=chunk_size,
+            use_checkpointing=use_checkpointing,
+            memory_efficient=memory_efficient,
+        )
+        
+        self.norm = nn.LayerNorm(d_model, eps=layer_norm_eps)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, L, D) input sequence
+        Returns:
+            output: (B, L, D) processed sequence
+        """
+        if self.use_checkpointing and self.training:
+            return checkpoint.checkpoint(self._forward_impl, x, use_reentrant=False)
+        else:
+            return self._forward_impl(x)
+    
+    def _forward_impl(self, x: torch.Tensor) -> torch.Tensor:
         residual = x
-        
         x = self.norm(x)
-        x = x.transpose(1, 2)  # (B, T, C)
-        
-        # Self-attention
-        x, _ = self.attention(x, x, x)
-        
-        x = x.transpose(1, 2)  # (B, C, T)
+        x = self.ssm(x)
+        x = self.dropout(x)
         return x + residual
 
 
-# ==================== Enhanced Encoder with Skip Connections ====================
+# ==================== Helper Functions ====================
 
-class LyroEncoder(nn.Module):
-    """Advanced encoder with multi-scale processing and skip connections"""
+def safe_group_norm(num_channels: int, base_groups: int = 8) -> nn.Module:
+    """Create safe GroupNorm that handles small channel counts"""
+    if num_channels <= 1:
+        return nn.Identity()
+    elif num_channels < base_groups:
+        return nn.GroupNorm(1, num_channels)
+    else:
+        num_groups = min(base_groups, num_channels)
+        while num_channels % num_groups != 0 and num_groups > 1:
+            num_groups -= 1
+        return nn.GroupNorm(num_groups, num_channels)
+
+
+# ==================== Memory-Optimized SSM Components ====================
+
+class MemoryOptimizedSSMEncoder(nn.Module):
+    """Memory-optimized SSM-based encoder with chunked processing"""
     
     def __init__(
         self,
         input_channels: int = 2,
         base_channels: int = 64,
         channel_multipliers: List[int] = [1, 2, 4, 8, 16],
-        kernel_sizes: List[int] = [7, 5, 5, 3, 3],
-        strides: List[int] = [2, 2, 2, 2, 2],
-        num_res_blocks: List[int] = [2, 2, 3, 3, 2],
+        ssm_layers: List[int] = [2, 2, 3, 3, 2],
         latent_channels: int = 8,
-        use_attention: List[bool] = [False, False, True, True, False],
+        d_state: int = 64,
         dropout: float = 0.1,
-        use_weight_norm: bool = True  # T-2: Weight Normalization
+        use_multiscale_ssm: bool = True,
+        use_weight_norm: bool = True,
+        # Memory optimization parameters
+        chunk_size: int = 1024,
+        use_checkpointing: bool = True,
+        memory_efficient: bool = True,
     ):
         super().__init__()
         
-        assert len(channel_multipliers) == len(kernel_sizes) == len(strides) == len(num_res_blocks)
+        assert len(channel_multipliers) == len(ssm_layers)
         
         self.num_stages = len(channel_multipliers)
+        self.base_channels = base_channels
+        self.use_checkpointing = use_checkpointing
+        self.chunk_size = chunk_size
+        self.memory_efficient = memory_efficient
         
-        # Initial convolution with Weight Norm
+        # Initial convolution
         stem_conv = nn.Conv1d(input_channels, base_channels, 7, padding=3, padding_mode="reflect")
         if use_weight_norm:
             stem_conv = nn.utils.weight_norm(stem_conv)
         
         self.stem = nn.Sequential(
             stem_conv,
-            nn.GroupNorm(8, base_channels),
+            safe_group_norm(base_channels),
             nn.SiLU()
         )
         
-        # Encoder stages
+        # Encoder stages with checkpointing
         self.stages = nn.ModuleList()
         current_channels = base_channels
         
         for i in range(self.num_stages):
             out_channels = base_channels * channel_multipliers[i]
             
-            # Downsampling layer
+            # Downsampling layer (except first stage)
             if i == 0:
                 downsample = nn.Identity()
             else:
-                downsample = MultiScaleConv1D(
-                    current_channels, out_channels,
-                    kernel_sizes=[kernel_sizes[i]],
-                    stride=strides[i],
-                    use_weight_norm=use_weight_norm
+                if use_weight_norm:
+                    downsample = nn.utils.weight_norm(
+                        nn.Conv1d(current_channels, out_channels, 3, stride=2, padding=1)
+                    )
+                else:
+                    downsample = nn.Conv1d(current_channels, out_channels, 3, stride=2, padding=1)
+                
+                downsample = nn.Sequential(
+                    downsample,
+                    safe_group_norm(out_channels),
+                    nn.SiLU()
                 )
             
-            # Residual blocks
-            res_blocks = nn.ModuleList()
-            for j in range(num_res_blocks[i]):
-                res_blocks.append(ResidualBlock1D(
-                    out_channels, 
-                    kernel_size=3,
-                    dilation=2**min(j, 3),  # Increasing dilation
-                    dropout=dropout,
-                    use_weight_norm=use_weight_norm
-                ))
-            
-            # Attention block
-            if use_attention[i] and out_channels >= 128:
-                attention = AttentionBlock1D(out_channels)
+            # Memory-optimized SSM blocks
+            if use_multiscale_ssm:
+                ssm_processor = MultiScaleSSM(
+                    d_model=out_channels,
+                    scales=[1, 2, 4] if out_channels >= 128 else [1, 2],
+                    d_state=d_state,
+                    dropout=dropout
+                )
             else:
-                attention = nn.Identity()
+                ssm_blocks = nn.ModuleList([
+                    CheckpointedSSMBlock(
+                        d_model=out_channels,
+                        d_state=d_state,
+                        dropout=dropout,
+                        chunk_size=chunk_size,
+                        use_checkpointing=use_checkpointing,
+                        memory_efficient=memory_efficient,
+                    ) for _ in range(ssm_layers[i])
+                ])
+                ssm_processor = lambda x: self._apply_checkpointed_ssm_blocks(x, ssm_blocks)
             
             stage = nn.ModuleDict({
                 'downsample': downsample,
-                'res_blocks': res_blocks,
-                'attention': attention
+                'ssm_processor': ssm_processor
             })
             
             self.stages.append(stage)
@@ -261,12 +496,26 @@ class LyroEncoder(nn.Module):
         
         self.final_conv = nn.Sequential(
             final_conv1,
-            nn.GroupNorm(8, latent_channels * 2),
+            safe_group_norm(latent_channels * 2),
             nn.SiLU(),
             final_conv2
         )
         
         self.apply(self._init_weights)
+    
+    def _apply_checkpointed_ssm_blocks(self, x, ssm_blocks):
+        """Apply multiple checkpointed SSM blocks"""
+        B, C, T = x.shape
+        x = x.transpose(1, 2)  # (B, T, C)
+        
+        for ssm_block in ssm_blocks:
+            if self.use_checkpointing and self.training:
+                x = checkpoint.checkpoint(ssm_block, x, use_reentrant=False)
+            else:
+                x = ssm_block(x)
+            
+        x = x.transpose(1, 2)  # (B, C, T)
+        return x
     
     def _init_weights(self, m):
         if isinstance(m, nn.Conv1d):
@@ -279,7 +528,7 @@ class LyroEncoder(nn.Module):
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """
-        Encode audio to latent representation with skip connections
+        Memory-optimized encoding with checkpointing
         
         Args:
             x: (B, 2, T) stereo audio
@@ -291,26 +540,46 @@ class LyroEncoder(nn.Module):
         
         skip_features = []
         
-        for stage in self.stages:
+        for i, stage in enumerate(self.stages):
+            # Apply downsampling
             x = stage['downsample'](x)
             
-            for res_block in stage['res_blocks']:
-                x = res_block(x)
+            # Convert to sequence format for SSM with checkpointing
+            B, C, T = x.shape
             
-            x = stage['attention'](x)
+            if self.use_checkpointing and self.training:
+                # Checkpoint the entire stage processing
+                x = checkpoint.checkpoint(
+                    self._process_stage_ssm, 
+                    x, stage['ssm_processor'], 
+                    use_reentrant=False
+                )
+            else:
+                x = self._process_stage_ssm(x, stage['ssm_processor'])
             
-            # A-2: Store skip connection features
+            # Store skip connection features
             skip_features.append(x.clone())
         
         latent = self.final_conv(x)
         
         return latent, skip_features
+    
+    def _process_stage_ssm(self, x, ssm_processor):
+        """Process SSM stage with proper tensor format handling"""
+        B, C, T = x.shape
+        x_seq = x.transpose(1, 2)  # (B, T, C)
+        
+        if hasattr(ssm_processor, '__call__'):
+            if isinstance(ssm_processor, MultiScaleSSM):
+                x_seq = ssm_processor(x_seq)
+            else:
+                x_seq = ssm_processor(x_seq)
+        
+        return x_seq.transpose(1, 2)  # (B, C, T)
 
 
-# ==================== Enhanced Upsampling with Anti-Aliasing ====================
-
-class AdvancedUpsampling(nn.Module):
-    """Advanced upsampling with anti-aliasing and Weight Norm"""
+class MemoryOptimizedSSMUpsampling(nn.Module):
+    """Memory-optimized SSM-enhanced upsampling with checkpointing"""
     
     def __init__(
         self,
@@ -318,68 +587,57 @@ class AdvancedUpsampling(nn.Module):
         out_channels: int,
         scale_factor: int = 2,
         kernel_size: int = 8,
-        use_pixel_shuffle: bool = False,
-        use_weight_norm: bool = True,  # T-2: Weight Normalization
-        sample_rate: int = 44100  # A-3: For anti-aliasing filter
+        use_weight_norm: bool = True,
+        sample_rate: int = 44100,
+        use_checkpointing: bool = True,
     ):
         super().__init__()
         
         self.scale_factor = scale_factor
-        self.sample_rate = sample_rate
+        self.use_checkpointing = use_checkpointing
         
-        if use_pixel_shuffle and scale_factor == 2:
-            # Sub-pixel convolution
-            conv = nn.Conv1d(in_channels, out_channels * scale_factor, 3, padding=1)
-            if use_weight_norm:
-                conv = nn.utils.weight_norm(conv)
-            
-            self.upsample = nn.Sequential(
-                conv,
-                nn.GLU(dim=1),  # Gated activation
-            )
-            self.use_pixel_shuffle = True
-        else:
-            # Transposed convolution
-            padding = (kernel_size - scale_factor) // 2
-            conv_transpose = nn.ConvTranspose1d(
-                in_channels, out_channels,
-                kernel_size=kernel_size,
-                stride=scale_factor,
-                padding=padding
-            )
-            
-            if use_weight_norm:
-                conv_transpose = nn.utils.weight_norm(conv_transpose)
-            
-            self.upsample = conv_transpose
-            self.use_pixel_shuffle = False
+        # Transposed convolution
+        padding = (kernel_size - scale_factor) // 2
+        conv_transpose = nn.ConvTranspose1d(
+            in_channels, out_channels,
+            kernel_size=kernel_size,
+            stride=scale_factor,
+            padding=padding
+        )
         
-        # A-3: Anti-aliasing filter for upsampling
+        if use_weight_norm:
+            conv_transpose = nn.utils.weight_norm(conv_transpose)
+        
+        self.upsample = conv_transpose
+        
+        # Anti-aliasing filter
         if scale_factor > 1:
-            cutoff_freq = 0.9 * (sample_rate / 2) / scale_factor
-            self.anti_alias_filter = torchaudio.transforms.LowpassBiquad(
-                sample_rate=sample_rate, 
-                cutoff_freq=cutoff_freq
-            )
+            try:
+                from torchaudio.transforms import LowpassBiquad
+                cutoff_freq = 0.9 * (sample_rate / 2) / scale_factor
+                self.anti_alias_filter = LowpassBiquad(
+                    sample_rate=sample_rate,
+                    cutoff_freq=cutoff_freq
+                )
+            except ImportError:
+                self.anti_alias_filter = nn.Identity()
         else:
             self.anti_alias_filter = nn.Identity()
         
-        self.norm = nn.GroupNorm(min(32, out_channels//4), out_channels)
+        self.norm = safe_group_norm(out_channels)
         self.activation = nn.SiLU()
     
     def forward(self, x):
+        if self.use_checkpointing and self.training:
+            return checkpoint.checkpoint(self._forward_impl, x, use_reentrant=False)
+        else:
+            return self._forward_impl(x)
+    
+    def _forward_impl(self, x):
         x = self.upsample(x)
         
-        if self.use_pixel_shuffle:
-            # Rearrange for sub-pixel convolution
-            B, C, T = x.shape
-            x = x.view(B, C // self.scale_factor, self.scale_factor, T)
-            x = x.permute(0, 1, 3, 2).contiguous()
-            x = x.view(B, C // self.scale_factor, T * self.scale_factor)
-        
-        # A-3: Apply anti-aliasing filter after upsampling
-        if self.scale_factor > 1:
-            # Apply anti-aliasing per channel
+        # Apply anti-aliasing filter after upsampling
+        if self.scale_factor > 1 and not isinstance(self.anti_alias_filter, nn.Identity):
             x_filtered = []
             for i in range(x.shape[1]):
                 x_ch = self.anti_alias_filter(x[:, i:i+1])
@@ -392,10 +650,8 @@ class AdvancedUpsampling(nn.Module):
         return x
 
 
-# ==================== Enhanced Decoder with Skip Connections ====================
-
-class LyroDecoder(nn.Module):
-    """Advanced decoder with high-quality upsampling and skip connections"""
+class MemoryOptimizedSSMDecoder(nn.Module):
+    """Memory-optimized SSM-based decoder with enhanced checkpointing"""
     
     def __init__(
         self,
@@ -404,19 +660,26 @@ class LyroDecoder(nn.Module):
         channel_multipliers: List[int] = [16, 8, 4, 2, 1],
         kernel_sizes: List[int] = [8, 8, 6, 6, 7],
         scale_factors: List[int] = [2, 2, 2, 2, 2],
-        num_res_blocks: List[int] = [2, 3, 3, 2, 2],
+        ssm_layers: List[int] = [2, 3, 3, 2, 2],
         output_channels: int = 2,
-        use_attention: List[bool] = [False, True, True, False, False],
-        use_pixel_shuffle: List[bool] = [False, True, True, False, False],
+        d_state: int = 64,
+        use_multiscale_ssm: bool = True,
         dropout: float = 0.1,
-        use_weight_norm: bool = True,  # T-2: Weight Normalization
-        sample_rate: int = 44100  # A-3: For anti-aliasing
+        use_weight_norm: bool = True,
+        sample_rate: int = 44100,
+        # Memory optimization parameters
+        chunk_size: int = 1024,
+        use_checkpointing: bool = True,
+        memory_efficient: bool = True,
     ):
         super().__init__()
         
-        assert len(channel_multipliers) == len(kernel_sizes) == len(scale_factors) == len(num_res_blocks)
+        assert len(channel_multipliers) == len(kernel_sizes) == len(scale_factors) == len(ssm_layers)
         
         self.num_stages = len(channel_multipliers)
+        self.use_checkpointing = use_checkpointing
+        self.chunk_size = chunk_size
+        self.memory_efficient = memory_efficient
         
         # Initial projection from latent space
         initial_channels = base_channels * channel_multipliers[0]
@@ -427,14 +690,14 @@ class LyroDecoder(nn.Module):
         
         self.initial_conv = nn.Sequential(
             initial_conv,
-            nn.GroupNorm(min(32, initial_channels//4), initial_channels),
+            safe_group_norm(initial_channels),
             nn.SiLU()
         )
         
-        # A-2: Skip connection projection layers
+        # Skip connection projection layers
         self.skip_projections = nn.ModuleList()
         
-        # Decoder stages
+        # Decoder stages with checkpointing
         self.stages = nn.ModuleList()
         current_channels = initial_channels
         
@@ -444,50 +707,52 @@ class LyroDecoder(nn.Module):
             else:
                 out_channels = base_channels * channel_multipliers[i + 1]
             
-            # A-2: Skip connection projection (except for last stage)
+            # Skip connection projection (except for last stage)
             if i < self.num_stages - 1:
-                skip_proj = nn.Conv1d(current_channels * 2, current_channels, 1)  # *2 for concatenation
+                skip_proj = nn.Conv1d(current_channels * 2, current_channels, 1)
                 if use_weight_norm:
                     skip_proj = nn.utils.weight_norm(skip_proj)
                 self.skip_projections.append(skip_proj)
             else:
                 self.skip_projections.append(nn.Identity())
             
-            # Upsampling layer
-            upsample = AdvancedUpsampling(
+            # Memory-optimized upsampling layer
+            upsample = MemoryOptimizedSSMUpsampling(
                 current_channels, out_channels,
                 scale_factor=scale_factors[i],
                 kernel_size=kernel_sizes[i],
-                use_pixel_shuffle=use_pixel_shuffle[i],
                 use_weight_norm=use_weight_norm,
-                sample_rate=sample_rate
+                sample_rate=sample_rate,
+                use_checkpointing=use_checkpointing
             )
             
-            # Residual blocks (except for last stage)
+            # Memory-optimized SSM processing (except for last stage)
             if i < self.num_stages - 1:
-                res_blocks = nn.ModuleList()
-                for j in range(num_res_blocks[i]):
-                    res_blocks.append(ResidualBlock1D(
-                        out_channels,
-                        kernel_size=3,
-                        dilation=2**min(j, 2),
-                        dropout=dropout,
-                        use_weight_norm=use_weight_norm
-                    ))
-                
-                # Attention block
-                if use_attention[i] and out_channels >= 128:
-                    attention = AttentionBlock1D(out_channels)
+                if use_multiscale_ssm:
+                    ssm_processor = MultiScaleSSM(
+                        d_model=out_channels,
+                        scales=[1, 2] if out_channels >= 128 else [1],
+                        d_state=d_state,
+                        dropout=dropout
+                    )
                 else:
-                    attention = nn.Identity()
+                    ssm_blocks = nn.ModuleList([
+                        CheckpointedSSMBlock(
+                            d_model=out_channels,
+                            d_state=d_state,
+                            dropout=dropout,
+                            chunk_size=chunk_size,
+                            use_checkpointing=use_checkpointing,
+                            memory_efficient=memory_efficient,
+                        ) for _ in range(ssm_layers[i])
+                    ])
+                    ssm_processor = lambda x: self._apply_checkpointed_ssm_blocks(x, ssm_blocks)
             else:
-                res_blocks = nn.ModuleList()
-                attention = nn.Identity()
+                ssm_processor = nn.Identity()
             
             stage = nn.ModuleDict({
                 'upsample': upsample,
-                'res_blocks': res_blocks,
-                'attention': attention
+                'ssm_processor': ssm_processor
             })
             
             self.stages.append(stage)
@@ -505,6 +770,20 @@ class LyroDecoder(nn.Module):
         
         self.apply(self._init_weights)
     
+    def _apply_checkpointed_ssm_blocks(self, x, ssm_blocks):
+        """Apply multiple checkpointed SSM blocks"""
+        B, C, T = x.shape
+        x = x.transpose(1, 2)  # (B, T, C)
+        
+        for ssm_block in ssm_blocks:
+            if self.use_checkpointing and self.training:
+                x = checkpoint.checkpoint(ssm_block, x, use_reentrant=False)
+            else:
+                x = ssm_block(x)
+            
+        x = x.transpose(1, 2)  # (B, C, T)
+        return x
+    
     def _init_weights(self, m):
         if isinstance(m, (nn.Conv1d, nn.ConvTranspose1d)):
             nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -516,7 +795,7 @@ class LyroDecoder(nn.Module):
     
     def forward(self, latent: torch.Tensor, skip_features: List[torch.Tensor]) -> torch.Tensor:
         """
-        Decode latent to audio with skip connections
+        Memory-optimized decoding with checkpointing
         
         Args:
             latent: (B, 8, T//32) compressed latent
@@ -524,13 +803,16 @@ class LyroDecoder(nn.Module):
         Returns:
             audio: (B, 2, T) reconstructed stereo audio
         """
+        # Calculate expected output length based on latent
+        expected_length = latent.shape[-1] * 32  # 32x upsampling ratio
+        
         x = self.initial_conv(latent)
         
         # Reverse skip features order (decoder goes from deep to shallow)
         skip_features = skip_features[::-1]
         
         for i, stage in enumerate(self.stages):
-            # A-2: Apply skip connections (except for last stage)
+            # Apply skip connections (except for last stage)
             if i < self.num_stages - 1 and i < len(skip_features):
                 skip_feature = skip_features[i]
                 
@@ -545,16 +827,46 @@ class LyroDecoder(nn.Module):
                 x = torch.cat([x, skip_feature], dim=1)
                 x = self.skip_projections[i](x)
             
+            # Apply upsampling with checkpointing
             x = stage['upsample'](x)
             
-            for res_block in stage['res_blocks']:
-                x = res_block(x)
-            
-            x = stage['attention'](x)
+            # Apply SSM processing with checkpointing
+            if not isinstance(stage['ssm_processor'], nn.Identity):
+                if self.use_checkpointing and self.training:
+                    x = checkpoint.checkpoint(
+                        self._process_stage_ssm, 
+                        x, stage['ssm_processor'], 
+                        use_reentrant=False
+                    )
+                else:
+                    x = self._process_stage_ssm(x, stage['ssm_processor'])
         
         audio = self.final_conv(x)
         
+        # Ensure exact length match by trimming or padding
+        current_length = audio.shape[-1]
+        if current_length != expected_length:
+            if current_length > expected_length:
+                # Trim excess
+                audio = audio[..., :expected_length]
+            else:
+                # Pad if needed
+                pad_length = expected_length - current_length
+                audio = F.pad(audio, (0, pad_length), mode='reflect')
+        
         return audio
+    
+    def _process_stage_ssm(self, x, ssm_processor):
+        """Process SSM stage with proper tensor format handling"""
+        B, C, T = x.shape
+        x_seq = x.transpose(1, 2)  # (B, T, C)
+        
+        if isinstance(ssm_processor, MultiScaleSSM):
+            x_seq = ssm_processor(x_seq)
+        else:
+            x_seq = ssm_processor(x_seq)
+        
+        return x_seq.transpose(1, 2)  # (B, C, T)
 
 
 # ==================== Enhanced Multi-Resolution STFT Loss ====================
@@ -564,13 +876,12 @@ class MultiResolutionSTFTLoss(nn.Module):
     
     def __init__(
         self,
-        # A-5: Extended STFT resolutions for better frequency coverage
         fft_sizes: List[int] = [4096, 2048, 1024, 512, 256, 128, 64],
         hop_sizes: Optional[List[int]] = None,
         win_sizes: Optional[List[int]] = None,
         w_sc: float = 1.0,
         w_log_mag: float = 1.0,
-        w_lin_mag: float = 0.5,  # Increased weight for linear magnitude
+        w_lin_mag: float = 0.5,
         w_phasediff: float = 0.0
     ):
         super().__init__()
@@ -610,6 +921,11 @@ class MultiResolutionSTFTLoss(nn.Module):
             x: (B, C, T) predicted audio
             y: (B, C, T) target audio
         """
+        # Ensure both tensors have the same length
+        min_length = min(x.shape[-1], y.shape[-1])
+        x = x[..., :min_length]
+        y = y[..., :min_length]
+        
         total_loss = 0.0
         
         for i, (fft_size, hop_size, win_size) in enumerate(
@@ -628,12 +944,18 @@ class MultiResolutionSTFTLoss(nn.Module):
                 y_stft_list.append(y_stft)
             
             # Stack channel results
-            x_stft = torch.stack(x_stft_list, dim=1)  # (B, C, F, T)
+            x_stft = torch.stack(x_stft_list, dim=1)
             y_stft = torch.stack(y_stft_list, dim=1)
             
             # Magnitude spectra
             x_mag = torch.abs(x_stft)
             y_mag = torch.abs(y_stft)
+            
+            # Ensure STFT results have the same shape (additional safety check)
+            if x_mag.shape != y_mag.shape:
+                min_time_frames = min(x_mag.shape[-1], y_mag.shape[-1])
+                x_mag = x_mag[..., :min_time_frames]
+                y_mag = y_mag[..., :min_time_frames]
             
             # Spectral convergence loss
             if self.w_sc > 0:
@@ -650,7 +972,7 @@ class MultiResolutionSTFTLoss(nn.Module):
                 lin_mag_loss = F.l1_loss(x_mag, y_mag)
                 total_loss += self.w_lin_mag * lin_mag_loss
             
-            # A-5: Frequency-weighted loss for better high-frequency preservation
+            # Frequency-weighted loss for better high-frequency preservation
             if i < 3:  # Apply to higher resolution STFTs
                 freq_weights = torch.linspace(0.5, 2.0, x_mag.shape[2], device=x_mag.device)
                 freq_weights = freq_weights.view(1, 1, -1, 1)
@@ -661,11 +983,17 @@ class MultiResolutionSTFTLoss(nn.Module):
         return total_loss / len(self.fft_sizes)
 
 
-# ==================== Enhanced Complete DCAE Model ====================
+# ==================== Complete Memory-Optimized DCAE Model ====================
 
-class LyroMusicDCAE(nn.Module):
+class MemoryOptimizedLyroMusicDCAE(nn.Module):
     """
-    Enhanced Lyro Music DCAE with all improvements applied
+    Memory-Optimized SSM-based Lyro Music DCAE with enhanced features
+    
+    Features:
+    - Chunked processing in StateSpaceKernel discretization
+    - Expanded gradient checkpointing
+    - Memory-efficient SSM operations
+    - Configurable chunk sizes and memory optimization levels
     """
     
     def __init__(
@@ -679,7 +1007,14 @@ class LyroMusicDCAE(nn.Module):
         encoder_base_channels: int = 64,
         decoder_base_channels: int = 64,
         dropout: float = 0.1,
-        use_weight_norm: bool = True,  # T-2: Weight Normalization
+        use_weight_norm: bool = True,
+        use_multiscale_ssm: bool = True,
+        d_state: int = 64,
+        # Memory optimization parameters
+        chunk_size: int = 1024,
+        use_checkpointing: bool = True,
+        memory_efficient: bool = True,
+        checkpointing_segments: int = 4,  # Number of segments for checkpointing
     ):
         super().__init__()
         
@@ -687,39 +1022,53 @@ class LyroMusicDCAE(nn.Module):
         self.latent_channels = latent_channels
         self.use_vq = use_vector_quantization
         self.dual_channel_processing = dual_channel_processing
+        self.chunk_size = chunk_size
+        self.use_checkpointing = use_checkpointing
+        self.memory_efficient = memory_efficient
+        self.checkpointing_segments = checkpointing_segments
         
-        # Enhanced Encoder with skip connections
-        self.encoder = LyroEncoder(
+        # Memory-optimized SSM-based Encoder with enhanced checkpointing
+        self.encoder = MemoryOptimizedSSMEncoder(
             input_channels=2,
             base_channels=encoder_base_channels,
             latent_channels=latent_channels,
+            d_state=d_state,
             dropout=dropout,
-            use_weight_norm=use_weight_norm
+            use_multiscale_ssm=use_multiscale_ssm,
+            use_weight_norm=use_weight_norm,
+            chunk_size=chunk_size,
+            use_checkpointing=use_checkpointing,
+            memory_efficient=memory_efficient,
         )
         
         # Vector quantization (optional)
         if use_vector_quantization:
-            from .enhanced_vq import VectorQuantizer  # Assume VQ is in separate file
+            from .vq import VectorQuantizer
             self.quantizer = VectorQuantizer(
                 num_embeddings=vq_num_embeddings,
                 embedding_dim=latent_channels,
                 commitment_cost=vq_commitment_cost
             )
         
-        # Enhanced Decoder with skip connections
-        self.decoder = LyroDecoder(
+        # Memory-optimized SSM-based Decoder with enhanced checkpointing
+        self.decoder = MemoryOptimizedSSMDecoder(
             latent_channels=latent_channels,
             base_channels=decoder_base_channels,
             output_channels=2,
+            d_state=d_state,
             dropout=dropout,
+            use_multiscale_ssm=use_multiscale_ssm,
             use_weight_norm=use_weight_norm,
-            sample_rate=sample_rate
+            sample_rate=sample_rate,
+            chunk_size=chunk_size,
+            use_checkpointing=use_checkpointing,
+            memory_efficient=memory_efficient,
         )
         
         # Dual-channel processing (learnable channel importance)
         if dual_channel_processing:
-            self.vocal_weight = nn.Parameter(torch.ones(4))  # Channels 0-3
-            self.inst_weight = nn.Parameter(torch.ones(4))   # Channels 4-7
+            self.vocal_weight = nn.Parameter(torch.ones(4))
+            self.inst_weight = nn.Parameter(torch.ones(4))
         
         # Enhanced Loss function
         self.stft_loss = MultiResolutionSTFTLoss()
@@ -739,7 +1088,7 @@ class LyroMusicDCAE(nn.Module):
     
     def encode(self, audio: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """
-        Encode audio to latent representation with skip features
+        Memory-optimized encoding with chunked processing and checkpointing
         
         Args:
             audio: (B, 2, T) stereo audio at 44.1kHz
@@ -747,6 +1096,50 @@ class LyroMusicDCAE(nn.Module):
             latent: (B, 8, T//32) compressed latent
             skip_features: List of skip connection features
         """
+        # Apply segmented checkpointing for very long audio
+        if (self.use_checkpointing and self.training and 
+            audio.shape[-1] > self.chunk_size * self.checkpointing_segments):
+            
+            return self._segmented_encode(audio)
+        else:
+            return self._encode_impl(audio)
+    
+    def _segmented_encode(self, audio: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        """Encode with segmented checkpointing for very long audio"""
+        B, C, T = audio.shape
+        segment_length = T // self.checkpointing_segments
+        
+        latent_segments = []
+        skip_features_segments = []
+        
+        for i in range(self.checkpointing_segments):
+            start = i * segment_length
+            end = (i + 1) * segment_length if i < self.checkpointing_segments - 1 else T
+            
+            audio_segment = audio[:, :, start:end]
+            
+            # Use checkpointing for each segment
+            latent_seg, skip_seg = checkpoint.checkpoint(
+                self._encode_impl, audio_segment, use_reentrant=False
+            )
+            
+            latent_segments.append(latent_seg)
+            skip_features_segments.append(skip_seg)
+        
+        # Combine segments
+        latent = torch.cat(latent_segments, dim=-1)
+        
+        # Combine skip features
+        combined_skip_features = []
+        for layer_idx in range(len(skip_features_segments[0])):
+            layer_features = [seg[layer_idx] for seg in skip_features_segments]
+            combined_layer = torch.cat(layer_features, dim=-1)
+            combined_skip_features.append(combined_layer)
+        
+        return latent, combined_skip_features
+    
+    def _encode_impl(self, audio: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        """Implementation of encoding"""
         latent, skip_features = self.encoder(audio)
         
         # Apply dual-channel weighting
@@ -759,7 +1152,7 @@ class LyroMusicDCAE(nn.Module):
     
     def decode(self, latent: torch.Tensor, skip_features: List[torch.Tensor]) -> torch.Tensor:
         """
-        Decode latent to audio with skip connections
+        Memory-optimized decoding with chunked processing and checkpointing
         
         Args:
             latent: (B, 8, T//32) compressed latent
@@ -767,7 +1160,46 @@ class LyroMusicDCAE(nn.Module):
         Returns:
             audio: (B, 2, T) reconstructed stereo audio
         """
-        return self.decoder(latent, skip_features)
+        # Apply segmented checkpointing for very long latents
+        if (self.use_checkpointing and self.training and 
+            latent.shape[-1] > self.chunk_size // 32 * self.checkpointing_segments):
+            
+            return self._segmented_decode(latent, skip_features)
+        else:
+            return self.decoder(latent, skip_features)
+    
+    def _segmented_decode(self, latent: torch.Tensor, skip_features: List[torch.Tensor]) -> torch.Tensor:
+        """Decode with segmented checkpointing for very long latents"""
+        B, C, T = latent.shape
+        segment_length = T // self.checkpointing_segments
+        
+        audio_segments = []
+        
+        for i in range(self.checkpointing_segments):
+            start = i * segment_length
+            end = (i + 1) * segment_length if i < self.checkpointing_segments - 1 else T
+            
+            latent_segment = latent[:, :, start:end]
+            
+            # Segment skip features accordingly
+            skip_segment = []
+            for skip_feature in skip_features:
+                # Calculate corresponding segment for each skip feature layer
+                skip_start = start * (skip_feature.shape[-1] // T)
+                skip_end = end * (skip_feature.shape[-1] // T)
+                skip_segment.append(skip_feature[:, :, skip_start:skip_end])
+            
+            # Use checkpointing for each segment
+            audio_seg = checkpoint.checkpoint(
+                self.decoder, latent_segment, skip_segment, use_reentrant=False
+            )
+            
+            audio_segments.append(audio_seg)
+        
+        # Combine segments
+        audio = torch.cat(audio_segments, dim=-1)
+        
+        return audio
     
     def forward(
         self,
@@ -775,13 +1207,16 @@ class LyroMusicDCAE(nn.Module):
         return_loss: bool = True
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
         """
-        Complete forward pass with all enhancements
+        Complete forward pass with memory optimization
         
         Args:
             audio: (B, 2, T) input stereo audio
             return_loss: whether to return loss components
         """
-        # Encode with skip connections
+        # Store original length
+        original_length = audio.shape[-1]
+        
+        # Memory-optimized encode with enhanced checkpointing
         latent, skip_features = self.encode(audio)
         
         # Vector quantization (if enabled)
@@ -789,8 +1224,18 @@ class LyroMusicDCAE(nn.Module):
         if self.use_vq:
             latent, vq_loss, _ = self.quantizer(latent)
         
-        # Decode with skip connections
+        # Memory-optimized decode with enhanced checkpointing
         reconstructed = self.decode(latent, skip_features)
+        
+        # Ensure reconstructed audio has the same length as input
+        if reconstructed.shape[-1] != original_length:
+            if reconstructed.shape[-1] > original_length:
+                # Trim if longer
+                reconstructed = reconstructed[..., :original_length]
+            else:
+                # Pad if shorter
+                pad_length = original_length - reconstructed.shape[-1]
+                reconstructed = F.pad(reconstructed, (0, pad_length), mode='reflect')
         
         if return_loss:
             # Enhanced reconstruction loss
@@ -818,8 +1263,8 @@ class LyroMusicDCAE(nn.Module):
         latent: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Separate vocal and instrumental latent channels"""
-        vocal_latent = latent[:, :4]  # Channels 0-3
-        inst_latent = latent[:, 4:]   # Channels 4-7
+        vocal_latent = latent[:, :4]
+        inst_latent = latent[:, 4:]
         return vocal_latent, inst_latent
     
     def encode_with_separation(
@@ -839,51 +1284,105 @@ class LyroMusicDCAE(nn.Module):
     
     def get_compression_ratio(self) -> float:
         """Get compression ratio"""
-        return 32.0  # 8x time compression × 4x channel compression
+        return 32.0
     
     def estimate_latent_shape(self, audio_length: int) -> Tuple[int, int]:
         """Estimate latent shape for given audio length"""
         latent_length = audio_length // 32
         return (self.latent_channels, latent_length)
+    
+    def get_memory_stats(self) -> Dict[str, str]:
+        """Get memory optimization configuration"""
+        return {
+            'chunk_size': self.chunk_size,
+            'use_checkpointing': self.use_checkpointing,
+            'memory_efficient': self.memory_efficient,
+            'checkpointing_segments': self.checkpointing_segments,
+            'chunked_discretization': 'enabled',
+            'enhanced_checkpointing': 'enabled'
+        }
 
 
-# ==================== Enhanced Model Factory ====================
+# ==================== Model Factory ====================
 
-def create_enhanced_lyro_dcae(
+def create_memory_optimized_lyro_dcae(
     model_size: str = "base",
     sample_rate: int = 44100,
     use_vq: bool = False,
     use_weight_norm: bool = True,
+    encoder_base_channels: int = None,
+    decoder_base_channels: int = None,
+    dropout: float = 0.1,
+    use_multiscale_ssm: bool = True,
+    d_state: int = 64,
+    # Memory optimization parameters  
+    chunk_size: int = 1024,
+    use_checkpointing: bool = True,
+    memory_efficient: bool = True,
+    checkpointing_segments: int = 4,
     **kwargs
-) -> LyroMusicDCAE:
-    """Create Enhanced Lyro DCAE model with all improvements"""
+) -> MemoryOptimizedLyroMusicDCAE:
+    """Create Memory-Optimized SSM-based Lyro DCAE model"""
     
     if model_size == "small":
-        config = {
-            "encoder_base_channels": 48,
-            "decoder_base_channels": 48,
+        base_config = {
+            "encoder_base_channels": encoder_base_channels or 48,
+            "decoder_base_channels": decoder_base_channels or 48,
             "latent_channels": 6,
         }
+        effective_d_state = 32
+        effective_chunk_size = 512  # Smaller chunks for small model
     elif model_size == "base":
-        config = {
-            "encoder_base_channels": 64,
-            "decoder_base_channels": 64,
+        base_config = {
+            "encoder_base_channels": encoder_base_channels or 64,
+            "decoder_base_channels": decoder_base_channels or 64,
             "latent_channels": 8,
         }
+        effective_d_state = d_state
+        effective_chunk_size = chunk_size
     elif model_size == "large":
-        config = {
-            "encoder_base_channels": 96,
-            "decoder_base_channels": 96,
+        base_config = {
+            "encoder_base_channels": encoder_base_channels or 96,
+            "decoder_base_channels": decoder_base_channels or 96,
             "latent_channels": 12,
         }
+        effective_d_state = 128
+        effective_chunk_size = chunk_size * 2  # Larger chunks for large model
     else:
         raise ValueError(f"Unknown model size: {model_size}")
     
-    config.update(kwargs)
+    # Get all parameters that MemoryOptimizedLyroMusicDCAE.__init__ accepts
+    model_init_params = {
+        'sample_rate', 'latent_channels', 'use_vector_quantization', 'vq_num_embeddings',
+        'vq_commitment_cost', 'dual_channel_processing', 'encoder_base_channels', 
+        'decoder_base_channels', 'dropout', 'use_weight_norm', 'use_multiscale_ssm',
+        'd_state', 'chunk_size', 'use_checkpointing', 'memory_efficient', 'checkpointing_segments'
+    }
     
-    return LyroMusicDCAE(
+    # Combine base config with kwargs, filtering out non-model parameters
+    final_config = {}
+    final_config.update(base_config)
+    final_config.update({k: v for k, v in kwargs.items() if k in model_init_params})
+    
+    return MemoryOptimizedLyroMusicDCAE(
         sample_rate=sample_rate,
         use_vector_quantization=use_vq,
         use_weight_norm=use_weight_norm,
-        **config
+        dropout=dropout,
+        use_multiscale_ssm=use_multiscale_ssm,
+        d_state=effective_d_state,
+        chunk_size=effective_chunk_size,
+        use_checkpointing=use_checkpointing,
+        memory_efficient=memory_efficient,
+        checkpointing_segments=checkpointing_segments,
+        **final_config
     )
+
+
+# For backward compatibility
+def create_enhanced_lyro_dcae(*args, **kwargs):
+    """Backward compatibility wrapper"""
+    return create_memory_optimized_lyro_dcae(*args, **kwargs)
+
+
+LyroMusicDCAE = MemoryOptimizedLyroMusicDCAE  # Backward compatibility alias

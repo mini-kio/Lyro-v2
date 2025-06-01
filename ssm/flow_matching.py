@@ -197,14 +197,13 @@ class VelocityPredictor(nn.Module):
         self.model = model
         self.use_cfg = use_cfg
         self.use_self_conditioning = use_self_conditioning
-        self.cfg_scale_range = cfg_scale_range
-        
-        # Self-conditioning projection
+        self.cfg_scale_range = cfg_scale_range        # Self-conditioning projection
         if use_self_conditioning:
-            # Assume model has inner_dim attribute
-            model_dim = getattr(model, 'inner_dim', 512)
-            self.self_cond_proj = nn.Linear(model_dim, model_dim)
-        
+            # Self-conditioning receives channel-wise mean, so input_dim is the number of channels
+            input_channels = getattr(model, 'input_channels', 8)
+            model_dim = getattr(model, 'hidden_dims', [128])[0] if hasattr(model, 'hidden_dims') else 512
+            self.self_cond_proj = nn.Linear(input_channels, model_dim)
+    
     def forward(
         self,
         x: torch.Tensor,
@@ -227,8 +226,10 @@ class VelocityPredictor(nn.Module):
         """
         # Add self-conditioning to conditions if available
         if self_cond is not None and self.use_self_conditioning:
-            # Project self-conditioning
-            self_cond_proj = self.self_cond_proj(self_cond.mean(dim=-1))
+            # Project self-conditioning - ensure device compatibility
+            device = x.device
+            self_cond_input = self_cond.mean(dim=-1).to(device)
+            self_cond_proj = self.self_cond_proj.to(device)(self_cond_input)
             conditions = conditions.copy()
             conditions['self_cond'] = self_cond_proj
         
@@ -527,9 +528,9 @@ class LyroFlowMatching(nn.Module):
             dt = t_next - t_curr
             
             t_batch = t_curr.expand(batch_size)
-            
-            # Get velocities
-            v_original = self.velocity_predictor(x, t_batch, {}, return_raw=True)
+              # Get velocities
+            empty_conditions = self.velocity_predictor._create_empty_conditions(new_conditions)
+            v_original = self.velocity_predictor(x, t_batch, empty_conditions, return_raw=True)
             v_edited = self.velocity_predictor(x, t_batch, new_conditions, return_raw=True)
             
             # Blend velocities based on mask and strength

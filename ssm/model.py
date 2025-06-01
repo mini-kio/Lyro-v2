@@ -140,8 +140,7 @@ class StateSpaceKernel(nn.Module):
         
         # Discretization
         A_discrete, B_discrete = self.discretize(A, B, dt)
-        
-        # SSM step
+          # SSM step
         y = self.ssm_step(x, A_discrete, B_discrete, C, self.D)
         
         return y
@@ -160,7 +159,15 @@ class StateSpaceKernel(nn.Module):
         
         # Zero-order hold discretization
         A_discrete = torch.exp(dt * A)  # (B, L, d_inner, d_state)
-        B_discrete = (A_discrete - 1) / A * B.unsqueeze(2)  # (B, L, d_inner, d_state)
+        # Expand B to match d_inner dimension
+        B_expanded = B.unsqueeze(2).expand(-1, -1, self.d_inner, -1)  # (B, L, d_inner, d_state)
+        # Safe division to avoid numerical issues
+        A_expanded = A.expand(B_batch, L, -1, -1)  # (B, L, d_inner, d_state)
+        B_discrete = torch.where(
+            torch.abs(A_expanded) > 1e-8,
+            (A_discrete - 1) / A_expanded * B_expanded,
+            dt.expand(-1, -1, -1, self.d_state) * B_expanded
+        )  # (B, L, d_inner, d_state)
         
         return A_discrete, B_discrete
     
@@ -184,8 +191,9 @@ class StateSpaceKernel(nn.Module):
             # State update
             h = A_t * h + B_t * x_t.unsqueeze(-1)
             
-            # Output
-            y_t = torch.sum(h * C_t.unsqueeze(1), dim=-1) + D * x_t
+            # Output - expand C_t to match h dimensions
+            C_t_expanded = C_t.unsqueeze(1).expand(-1, d_inner, -1)  # (B, d_inner, d_state)
+            y_t = torch.sum(h * C_t_expanded, dim=-1) + D * x_t
             outputs.append(y_t)
         
         y = torch.stack(outputs, dim=1)  # (B, L, d_inner)
@@ -339,10 +347,9 @@ class AdvancedConditionalEmbedding(nn.Module):
             num_heads=8,
             batch_first=True
         )
-        
-        # Fusion layers
+          # Fusion layers
         self.fusion = nn.Sequential(
-            nn.Linear(d_model * 4, d_model * 2),
+            nn.Linear(d_model * 5, d_model * 2),  # Changed from 4 to 5 embeddings
             nn.LayerNorm(d_model * 2),
             nn.GELU(),
             nn.Linear(d_model * 2, d_model),
@@ -447,6 +454,7 @@ class SSMUNetBlock(nn.Module):
     def __init__(
         self,
         d_model: int,
+        condition_dim: int,
         num_ssm_layers: int = 2,
         d_state: int = 64,
         use_multiscale: bool = True,
@@ -475,9 +483,9 @@ class SSMUNetBlock(nn.Module):
                 ) for _ in range(num_ssm_layers)
             ])
         
-        # Condition injection
+        # Condition injection - map from condition dimension to current stage dimension
         self.condition_proj = nn.Sequential(
-            nn.Linear(d_model, d_model),
+            nn.Linear(condition_dim, d_model),  # Map from condition dim to current stage dim
             nn.GELU(),
             nn.Linear(d_model, d_model)
         )
@@ -553,14 +561,14 @@ class LyroSSMUNet(nn.Module):
         self.pos_embed = nn.Parameter(
             torch.randn(1, max_seq_len, hidden_dims[0]) * 0.02
         )
-        
-        # Encoder stages
+          # Encoder stages
         self.encoders = nn.ModuleList()
         self.downsamplers = nn.ModuleList()
         
         for i in range(self.num_stages - 1):
             encoder = SSMUNetBlock(
                 d_model=hidden_dims[i],
+                condition_dim=hidden_dims[0],  # All blocks receive condition from base dimension
                 num_ssm_layers=ssm_layers[i],
                 d_state=d_state,
                 use_multiscale=use_multiscale_ssm,
@@ -577,10 +585,10 @@ class LyroSSMUNet(nn.Module):
                          kernel_size=3, stride=2, padding=1)
             )
             self.downsamplers.append(downsampler)
-        
-        # Bottleneck
+          # Bottleneck
         self.bottleneck = SSMUNetBlock(
             d_model=hidden_dims[-1],
+            condition_dim=hidden_dims[0],  # Condition from base dimension
             num_ssm_layers=ssm_layers[-1],
             d_state=d_state,
             use_multiscale=use_multiscale_ssm,
@@ -606,10 +614,10 @@ class LyroSSMUNet(nn.Module):
                 nn.LayerNorm(hidden_dims[i-1])
             )
             self.upsamplers.append(upsampler)
-            
-            # Decoder with skip connections
+              # Decoder with skip connections
             decoder = SSMUNetBlock(
                 d_model=hidden_dims[i-1],
+                condition_dim=hidden_dims[0],  # Condition from base dimension
                 num_ssm_layers=ssm_layers[i-1],
                 d_state=d_state,
                 use_multiscale=use_multiscale_ssm,
@@ -671,19 +679,18 @@ class LyroSSMUNet(nn.Module):
         
         # U-Net forward pass
         skip_connections = []
-        
-        # Encoder
+          # Encoder
         for i, (encoder, downsampler) in enumerate(zip(self.encoders, self.downsamplers)):
             x = encoder(x, condition_emb)
             skip_connections.append(x)
             
             # Downsample
-            x = x.transpose(1, 2)  # (B, D, T)
-            x = downsampler[0](x.transpose(1, 2))  # LayerNorm
-            x = downsampler[1](x)  # Linear
-            x = x.transpose(1, 2)  # (B, T, D)
-            x = downsampler[2](x.transpose(1, 2))  # Conv1d downsample
-            x = x.transpose(1, 2)  # (B, T//2, D)
+            # x shape: (B, T, D)
+            x = downsampler[0](x)  # LayerNorm: (B, T, D)
+            x = downsampler[1](x)  # Linear: (B, T, D_new)
+            x = x.transpose(1, 2)  # (B, D_new, T)
+            x = downsampler[2](x)  # Conv1d downsample: (B, D_new, T//2)
+            x = x.transpose(1, 2)  # (B, T//2, D_new)
         
         # Bottleneck
         x = self.bottleneck(x, condition_emb)
