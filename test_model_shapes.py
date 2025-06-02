@@ -70,20 +70,22 @@ def test_model_shapes():
     except Exception as e:
         print(f"❌ 테스트 입력 생성 실패: {e}")
         return False
-    
-    # Forward pass 테스트
+      # Forward pass 테스트
     print("\n3. Forward pass 테스트 중...")
     try:
         model.eval()
-        with torch.no_grad():
+        with torch.no_grad():            # 조건들을 딕셔너리로 묶기
+            conditions = {
+                'task_token': torch.zeros(batch_size, dtype=torch.long).to(device),  # 기본 태스크
+                'lyrics': None,
+                'style_prompt': torch.randn(batch_size, 512).to(device),  # 스타일 임베딩 (512 차원)
+                'icl_reference': None
+            }
+            
             output = model(
                 x=x,
                 time=time,
-                key=key,
-                tempo=tempo,
-                genre=genre,
-                mood=mood,
-                structure=structure
+                conditions=conditions
             )
         
         print(f"✅ Forward pass 성공")
@@ -103,37 +105,37 @@ def test_model_shapes():
         import traceback
         traceback.print_exc()
         return False
-    
-    # Flow Matching 모델 테스트
+      # Flow Matching 모델 테스트
     print("\n4. Flow Matching 모델 테스트 중...")
     try:
-        config = FlowConfig(
-            model_dim=512,
-            num_layers=12,
-            num_heads=8,
-            hidden_dim=2048,
-            max_seq_len=8192,
-            dropout=0.1
-        )
+        config = FlowConfig()
         
-        flow_model = LyroFlowMatching(config).to(device)
-        print("✅ Flow Matching 모델 생성 성공")
-        
-        # Flow Matching forward pass
+        flow_model = LyroFlowMatching(
+            model=model,
+            scheduler_type="cosine",
+            solver_type="heun",
+            sigma=1e-4,
+            flow_type="rectified"
+        ).to(device)
+        print("✅ Flow Matching 모델 생성 성공")          # Flow Matching generate 테스트
         with torch.no_grad():
-            # 잠재 공간 입력 (DCAE 출력 가정)
-            latent_dim = 64
+            # 잠재 공간 출력 형태 (DCAE 출력 가정)
+            latent_dim = 8  # SSM 모델의 입력 채널과 일치
             latent_seq_len = seq_len // 4  # downsampling 가정
-            z = torch.randn(batch_size, latent_dim, latent_seq_len).to(device)
+            shape = (batch_size, latent_dim, latent_seq_len)
+              # 조건들을 딕셔너리로 묶기
+            flow_conditions = {
+                'task_token': torch.zeros(batch_size, dtype=torch.long).to(device),
+                'lyrics': None,
+                'style_prompt': torch.randn(batch_size, 512).to(device),  # 512 차원
+                'icl_reference': None
+            }
             
-            flow_output = flow_model(
-                z=z,
-                time=time,
-                key=key,
-                tempo=tempo,
-                genre=genre,
-                mood=mood,
-                structure=structure
+            # generate 메서드 사용
+            flow_output, trajectory = flow_model.generate(
+                shape=shape,
+                conditions=flow_conditions,
+                num_steps=4  # 빠른 테스트를 위해 적은 스텝 사용
             )
         
         print(f"✅ Flow Matching forward pass 성공")

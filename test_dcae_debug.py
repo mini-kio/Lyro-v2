@@ -43,7 +43,6 @@ def test_dcae_models():
             
             print(f"✅ {model_size} 모델 생성 성공")
             print(f"   - Latent channels: {model.latent_channels}")
-            print(f"   - Dual channel processing: {model.dual_channel_processing}")
             
             # 모델 파라미터 수 출력
             total_params = sum(p.numel() for p in model.parameters())
@@ -77,7 +76,8 @@ def test_dcae_models():
                     print(f"   - 입력 shape: {audio.shape}")
                     print(f"   - 출력 shape: {reconstructed.shape}")
                     print(f"   - 손실: {loss_dict['total_loss'].item():.4f}")
-                      # 채널 분리 테스트
+                    
+                    # 채널 분리 테스트
                     if model.dual_channel_processing:
                         print("   채널 분리 테스트...")
                         latent, skip_features = model.encode(audio)

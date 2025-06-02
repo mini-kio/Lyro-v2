@@ -89,7 +89,6 @@ class ODESolver(ABC):
 
 class EulerSolver(ODESolver):
     """Euler method (1st order)"""
-    
     def step(
         self,
         velocity_fn: Callable,
@@ -100,12 +99,13 @@ class EulerSolver(ODESolver):
         **kwargs
     ) -> torch.Tensor:
         velocity = velocity_fn(x, t, conditions, **kwargs)
-        return x + dt * velocity
+        # Reshape dt for broadcasting: (B,) -> (B, 1, 1)
+        dt_expanded = dt.view(-1, 1, 1)
+        return x + dt_expanded * velocity
 
 
 class HeunSolver(ODESolver):
     """Heun's method (2nd order)"""
-    
     def step(
         self,
         velocity_fn: Callable,
@@ -118,19 +118,21 @@ class HeunSolver(ODESolver):
         # First evaluation
         v1 = velocity_fn(x, t, conditions, **kwargs)
         
+        # Reshape dt for broadcasting: (B,) -> (B, 1, 1)
+        dt_expanded = dt.view(-1, 1, 1)
+        
         # Predictor step
-        x_pred = x + dt * v1
+        x_pred = x + dt_expanded * v1
         
         # Second evaluation
         v2 = velocity_fn(x_pred, t + dt, conditions, **kwargs)
         
         # Corrector step
-        return x + dt * 0.5 * (v1 + v2)
+        return x + dt_expanded * 0.5 * (v1 + v2)
 
 
 class RK4Solver(ODESolver):
     """4th-order Runge-Kutta (high quality)"""
-    
     def step(
         self,
         velocity_fn: Callable,
@@ -140,12 +142,15 @@ class RK4Solver(ODESolver):
         conditions: Dict,
         **kwargs
     ) -> torch.Tensor:
-        k1 = velocity_fn(x, t, conditions, **kwargs)
-        k2 = velocity_fn(x + dt * k1 / 2, t + dt / 2, conditions, **kwargs)
-        k3 = velocity_fn(x + dt * k2 / 2, t + dt / 2, conditions, **kwargs)
-        k4 = velocity_fn(x + dt * k3, t + dt, conditions, **kwargs)
+        # Reshape dt for broadcasting: (B,) -> (B, 1, 1)
+        dt_expanded = dt.view(-1, 1, 1)
         
-        return x + dt * (k1 + 2*k2 + 2*k3 + k4) / 6
+        k1 = velocity_fn(x, t, conditions, **kwargs)
+        k2 = velocity_fn(x + dt_expanded * k1 / 2, t + dt / 2, conditions, **kwargs)
+        k3 = velocity_fn(x + dt_expanded * k2 / 2, t + dt / 2, conditions, **kwargs)
+        k4 = velocity_fn(x + dt_expanded * k3, t + dt, conditions, **kwargs)
+        
+        return x + dt_expanded * (k1 + 2*k2 + 2*k3 + k4) / 6
 
 
 class AdaptiveSolver(ODESolver):
