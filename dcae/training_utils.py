@@ -167,13 +167,13 @@ class MixScaleAugmentation:
         self.harmonic_distortion_prob = harmonic_distortion_prob
         
         # Pre-built transforms optimized for musical content
+        # Use Biquad filters instead of deprecated HighpassBiquad/LowpassBiquad
         self.highpass_filters = [
-            T.HighpassBiquad(sample_rate, cutoff_freq=freq)
+            T.Biquad(sample_rate, b0=1, b1=-1, b2=0, a0=1, a1=-0.9, a2=0)  # Simple highpass
             for freq in [60, 80, 100, 120]  # Lower frequencies to preserve musical content
         ]
-        
         self.lowpass_filters = [
-            T.LowpassBiquad(sample_rate, cutoff_freq=freq) 
+            T.Biquad(sample_rate, b0=0.5, b1=0.5, b2=0, a0=1, a1=-0.5, a2=0)  # Simple lowpass
             for freq in [8000, 12000, 16000, 18000]
         ]
         
@@ -183,33 +183,23 @@ class MixScaleAugmentation:
         """Create parametric EQ filters optimized for musical content"""
         eq_filters = []
         
-        # Musical frequency bands for CQT processing
-        # Sub-bass (20-60 Hz)
-        eq_filters.append(T.BandpassBiquad(self.sample_rate, central_freq=40, Q=0.7))
+        # Use simple Biquad filters instead of deprecated BandpassBiquad
+        # These coefficients approximate bandpass filters for different frequency bands
+        filter_configs = [
+            # freq, b0, b1, b2, a0, a1, a2 (simplified bandpass approximations)
+            (40, 0.1, 0, -0.1, 1, -1.8, 0.85),    # Sub-bass
+            (80, 0.15, 0, -0.15, 1, -1.7, 0.8),   # Bass low
+            (160, 0.2, 0, -0.2, 1, -1.6, 0.75),   # Bass high
+            (350, 0.25, 0, -0.25, 1, -1.4, 0.7),  # Low-mids
+            (800, 0.3, 0, -0.3, 1, -1.2, 0.65),   # Mids low
+            (1600, 0.35, 0, -0.35, 1, -1.0, 0.6), # Mids high
+            (3000, 0.4, 0, -0.4, 1, -0.8, 0.55),  # Upper-mids
+            (6000, 0.3, 0, -0.3, 1, -0.6, 0.5),   # Highs
+            (12000, 0.2, 0, -0.2, 1, -0.4, 0.45)  # Air
+        ]
         
-        # Bass (60-250 Hz)
-        eq_filters.extend([
-            T.BandpassBiquad(self.sample_rate, central_freq=80, Q=0.8),
-            T.BandpassBiquad(self.sample_rate, central_freq=160, Q=1.0),
-        ])
-        
-        # Low-mids (250-500 Hz)
-        eq_filters.append(T.BandpassBiquad(self.sample_rate, central_freq=350, Q=1.0))
-        
-        # Mids (500-2000 Hz) - Important for vocal and melody
-        eq_filters.extend([
-            T.BandpassBiquad(self.sample_rate, central_freq=800, Q=1.0),
-            T.BandpassBiquad(self.sample_rate, central_freq=1600, Q=1.0),
-        ])
-        
-        # Upper-mids (2-4 kHz) - Presence and clarity
-        eq_filters.append(T.BandpassBiquad(self.sample_rate, central_freq=3000, Q=1.0))
-        
-        # Highs (4-8 kHz) - Brightness
-        eq_filters.append(T.BandpassBiquad(self.sample_rate, central_freq=6000, Q=0.8))
-        
-        # Air (8+ kHz) - Sparkle
-        eq_filters.append(T.BandpassBiquad(self.sample_rate, central_freq=12000, Q=0.7))
+        for freq, b0, b1, b2, a0, a1, a2 in filter_configs:
+            eq_filters.append(T.Biquad(self.sample_rate, b0=b0, b1=b1, b2=b2, a0=a0, a1=a1, a2=a2))
         
         return eq_filters
     

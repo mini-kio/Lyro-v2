@@ -1,8 +1,8 @@
 # lyro/dcae/model.py
 """
-CQT-SSM-based LYRO DCAE Implementation with Harmonic-Percussive Separation
+Enhanced CQT-SSM-based LYRO DCAE Implementation with Unified SSM Components
 State Space Model based on Constant-Q Transform for high-quality music compression
-Enhanced with CQT, H-P separation, and optimized for music understanding
+Now using unified SSM components from ssm.model for consistency and performance
 """
 
 import torch
@@ -16,12 +16,17 @@ import math
 from pathlib import Path
 import librosa
 
-# Import SSM components from SSM module
+# Import unified SSM components from SSM module
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ssm.model import MultiScaleSSM, SinusoidalEmbedding
+from ssm.model import (
+    StateSpaceKernel, 
+    SSMBlock, 
+    MultiScaleSSM, 
+    SinusoidalEmbedding
+)
 
 
 # ==================== CQT and Harmonic-Percussive Modules ====================
@@ -382,12 +387,132 @@ class CQTInverseTransform(nn.Module):
         return audio_stereo
 
 
+# ==================== Enhanced SSM Components (Using Unified SSM) ====================
+
+class EnhancedMultiScaleSSM(MultiScaleSSM):
+    """
+    Enhanced Multi-scale SSM based on the unified SSM implementation
+    Adds CQT-specific optimizations while maintaining compatibility
+    """
+    
+    def __init__(
+        self,
+        d_model: int,
+        scales: List[int] = [1, 2, 4],
+        d_state: int = 64,
+        dropout: float = 0.1,
+        # CQT-specific enhancements
+        use_harmonic_enhancement: bool = True,
+        frequency_aware: bool = True,
+        **kwargs
+    ):
+        super().__init__(d_model, scales, d_state, dropout)
+        
+        self.use_harmonic_enhancement = use_harmonic_enhancement
+        self.frequency_aware = frequency_aware
+        
+        if use_harmonic_enhancement:
+            # Add frequency-aware processing
+            self.freq_proj = nn.Linear(d_model, d_model)
+            self.harmonic_gate = nn.Parameter(torch.ones(d_model))
+        
+        if frequency_aware:
+            # Position-dependent processing for frequency bins
+            self.freq_embed = SinusoidalEmbedding(d_model)
+    
+    def forward(self, x: torch.Tensor, freq_pos: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Enhanced forward pass with CQT-specific processing
+        
+        Args:
+            x: (B, L, D) input sequence
+            freq_pos: (B, L) frequency position indices for CQT bins
+        Returns:
+            output: (B, L, D) processed sequence
+        """
+        if self.frequency_aware and freq_pos is not None:
+            # Add frequency positional encoding
+            freq_emb = self.freq_embed(freq_pos)
+            x = x + freq_emb
+        
+        # Apply multi-scale SSM processing
+        output = super().forward(x)
+        
+        if self.use_harmonic_enhancement:
+            # Apply harmonic enhancement
+            harmonic_features = torch.tanh(self.freq_proj(output))
+            output = output * (1 + self.harmonic_gate * harmonic_features)
+        
+        return output
+
+
+class CQTSSMBlock(SSMBlock):
+    """
+    CQT-optimized SSM Block using the unified SSM implementation
+    Inherits from SSMBlock and adds CQT-specific enhancements
+    """
+    
+    def __init__(
+        self,
+        d_model: int,
+        d_state: int = 64,
+        d_conv: int = 4,
+        expand: int = 2,
+        dropout: float = 0.1,
+        layer_norm_eps: float = 1e-5,
+        # CQT-specific parameters
+        use_frequency_conditioning: bool = True,
+        use_harmonic_bias: bool = True,
+        **kwargs
+    ):
+        super().__init__(d_model, d_state, d_conv, expand, dropout, layer_norm_eps)
+        
+        self.use_frequency_conditioning = use_frequency_conditioning
+        self.use_harmonic_bias = use_harmonic_bias
+        
+        if use_frequency_conditioning:
+            # Frequency-aware conditioning
+            self.freq_cond = nn.Linear(d_model, d_model)
+        
+        if use_harmonic_bias:
+            # Harmonic bias for musical structure
+            self.harmonic_bias = nn.Parameter(torch.zeros(d_model))
+    
+    def forward(self, x: torch.Tensor, freq_info: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Enhanced forward pass with CQT-specific conditioning
+        
+        Args:
+            x: (B, L, D) input sequence  
+            freq_info: (B, L, D) frequency information
+        Returns:
+            output: (B, L, D) processed sequence
+        """
+        residual = x
+        x = self.norm(x)
+        
+        # Apply frequency conditioning if available
+        if self.use_frequency_conditioning and freq_info is not None:
+            freq_cond = torch.sigmoid(self.freq_cond(freq_info))
+            x = x * freq_cond
+        
+        # Apply SSM processing (using parent's implementation)
+        x = self.ssm(x)
+        
+        # Apply harmonic bias
+        if self.use_harmonic_bias:
+            x = x + self.harmonic_bias
+        
+        x = self.dropout(x)
+        return x + residual
+
+
 # ==================== CQT-SSM Encoder ====================
 
 class CQTSSMEncoder(nn.Module):
     """
     CQT-based SSM encoder with Harmonic-Percussive separation
-    Superior to mel spectrogram for music understanding
+    Now using unified SSM components for better consistency
     """
     
     def __init__(
@@ -398,13 +523,13 @@ class CQTSSMEncoder(nn.Module):
         base_channels: int = 64,
         latent_channels: int = 8,
         ssm_layers: List[int] = [2, 2, 3, 3, 2],
-        d_state: int = 32,  # Reduced from 64
+        d_state: int = 64,
         dropout: float = 0.1,
         use_harmonic_percussive: bool = True,
         use_multiscale_ssm: bool = True,
         use_weight_norm: bool = True,
         # Memory optimization parameters
-        chunk_size: int = 256,  # Smaller chunks for CQT
+        chunk_size: int = 256,
         use_checkpointing: bool = True,
         memory_efficient: bool = True,
     ):
@@ -441,7 +566,7 @@ class CQTSSMEncoder(nn.Module):
             nn.SiLU()
         )
         
-        # Multi-stage encoder with SSM
+        # Multi-stage encoder with unified SSM
         self.stages = nn.ModuleList()
         current_channels = base_channels
         
@@ -462,57 +587,25 @@ class CQTSSMEncoder(nn.Module):
                     nn.SiLU()
                 )
             
-            # SSM processing
-            if use_harmonic_percussive and i >= 1:
-                # Separate SSM for harmonic and percussive when available
-                harmonic_ssm = MultiScaleSSM(
+            # SSM processing using unified components
+            if use_multiscale_ssm:
+                ssm_processor = EnhancedMultiScaleSSM(
                     d_model=out_channels,
                     scales=[1, 2] if out_channels >= 128 else [1],
                     d_state=d_state,
-                    dropout=dropout
-                ) if use_multiscale_ssm else nn.ModuleList([
-                    CQTSSMBlock(
-                        d_model=out_channels,
-                        d_state=d_state,
-                        dropout=dropout,
-                        chunk_size=chunk_size,
-                        use_checkpointing=use_checkpointing,
-                        memory_efficient=memory_efficient,
-                    ) for _ in range(num_ssm_layers)
-                ])
-                
-                percussive_ssm = MultiScaleSSM(
-                    d_model=out_channels,
-                    scales=[1, 2] if out_channels >= 128 else [1], 
-                    d_state=d_state,
-                    dropout=dropout
-                ) if use_multiscale_ssm else nn.ModuleList([
-                    CQTSSMBlock(
-                        d_model=out_channels,
-                        d_state=d_state,
-                        dropout=dropout,
-                        chunk_size=chunk_size,
-                        use_checkpointing=use_checkpointing,
-                        memory_efficient=memory_efficient,
-                    ) for _ in range(num_ssm_layers)
-                ])
-                
-                ssm_processor = {'harmonic': harmonic_ssm, 'percussive': percussive_ssm}
+                    dropout=dropout,
+                    use_harmonic_enhancement=True,
+                    frequency_aware=True
+                )
             else:
-                # Single SSM
-                ssm_processor = MultiScaleSSM(
-                    d_model=out_channels,
-                    scales=[1, 2, 4] if out_channels >= 128 else [1, 2],
-                    d_state=d_state,
-                    dropout=dropout
-                ) if use_multiscale_ssm else nn.ModuleList([
+                # Use list of CQTSSMBlocks (inheriting from unified SSMBlock)
+                ssm_processor = nn.ModuleList([
                     CQTSSMBlock(
                         d_model=out_channels,
                         d_state=d_state,
                         dropout=dropout,
-                        chunk_size=chunk_size,
-                        use_checkpointing=use_checkpointing,
-                        memory_efficient=memory_efficient,
+                        use_frequency_conditioning=True,
+                        use_harmonic_bias=True,
                     ) for _ in range(num_ssm_layers)
                 ])
             
@@ -531,10 +624,15 @@ class CQTSSMEncoder(nn.Module):
         if use_weight_norm:
             final_conv1 = nn.utils.weight_norm(final_conv1)
             final_conv2 = nn.utils.weight_norm(final_conv2)
+          # Calculate appropriate number of groups for GroupNorm
+        num_groups = min(8, latent_channels * 2)
+        # Ensure num_channels is divisible by num_groups
+        while (latent_channels * 2) % num_groups != 0 and num_groups > 1:
+            num_groups -= 1
         
         self.final_conv = nn.Sequential(
             final_conv1,
-            nn.GroupNorm(min(8, latent_channels * 2), latent_channels * 2),
+            nn.GroupNorm(num_groups, latent_channels * 2),
             nn.SiLU(),
             final_conv2
         )
@@ -552,7 +650,7 @@ class CQTSSMEncoder(nn.Module):
     
     def forward(self, audio: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """
-        Encode audio to latent representation using CQT and SSM
+        Encode audio to latent representation using CQT and unified SSM
         
         Args:
             audio: (B, 2, T) stereo audio
@@ -582,7 +680,7 @@ class CQTSSMEncoder(nn.Module):
         
         skip_features = []
         
-        # Multi-stage processing
+        # Multi-stage processing with unified SSM
         for i, stage in enumerate(self.stages):
             # Downsampling
             x = stage['downsample'](x)
@@ -595,39 +693,30 @@ class CQTSSMEncoder(nn.Module):
                 skip_features.append(torch.zeros_like(x))
                 continue
             
-            if isinstance(stage['ssm_processor'], dict):
-                # Separate harmonic and percussive processing
-                x_seq = x.permute(0, 2, 3, 1).contiguous().view(B * H, W, C)  # (B*H, W, C)
-                
-                if self.use_checkpointing and self.training:
-                    harmonic_out = checkpoint.checkpoint(
-                        self._process_ssm, x_seq, stage['ssm_processor']['harmonic'],
-                        use_reentrant=False
-                    )
-                    percussive_out = checkpoint.checkpoint(
-                        self._process_ssm, x_seq, stage['ssm_processor']['percussive'],
-                        use_reentrant=False
-                    )
-                else:
-                    harmonic_out = self._process_ssm(x_seq, stage['ssm_processor']['harmonic'])
-                    percussive_out = self._process_ssm(x_seq, stage['ssm_processor']['percussive'])
-                
-                # Combine harmonic and percussive
-                x_out = (harmonic_out + percussive_out) / 2
-                x = x_out.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
-            else:
-                # Single SSM processing
-                x_seq = x.permute(0, 2, 3, 1).contiguous().view(B * H, W, C)
-                
+            # Reshape for SSM processing
+            x_seq = x.permute(0, 2, 3, 1).contiguous().view(B * H, W, C)  # (B*H, W, C)
+            
+            if isinstance(stage['ssm_processor'], EnhancedMultiScaleSSM):
+                # Enhanced MultiScale SSM
                 if self.use_checkpointing and self.training:
                     x_seq = checkpoint.checkpoint(
-                        self._process_ssm, x_seq, stage['ssm_processor'],
+                        stage['ssm_processor'], x_seq,
                         use_reentrant=False
                     )
                 else:
-                    x_seq = self._process_ssm(x_seq, stage['ssm_processor'])
-                
-                x = x_seq.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
+                    x_seq = stage['ssm_processor'](x_seq)
+            else:
+                # List of CQTSSMBlocks
+                if self.use_checkpointing and self.training:
+                    x_seq = checkpoint.checkpoint(
+                        self._process_ssm_blocks, x_seq, stage['ssm_processor'],
+                        use_reentrant=False
+                    )
+                else:
+                    x_seq = self._process_ssm_blocks(x_seq, stage['ssm_processor'])
+            
+            # Reshape back
+            x = x_seq.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
             
             # Store skip features (compressed) with size validation
             if x.shape[-2] > 0 and x.shape[-1] > 0:
@@ -641,265 +730,11 @@ class CQTSSMEncoder(nn.Module):
         
         return latent, skip_features
     
-    def _process_ssm(self, x_seq, ssm_processor):
-        """Process sequence through SSM"""
-        if isinstance(ssm_processor, MultiScaleSSM):
-            return ssm_processor(x_seq)
-        else:
-            # Multiple SSM blocks
-            for ssm_block in ssm_processor:
-                x_seq = ssm_block(x_seq)
-            return x_seq
-
-
-class CQTSSMBlock(nn.Module):
-    """CQT-optimized SSM Block with enhanced gradient checkpointing"""
-    
-    def __init__(
-        self,
-        d_model: int,
-        d_state: int = 32,
-        d_conv: int = 4,
-        expand: int = 2,
-        dropout: float = 0.1,
-        layer_norm_eps: float = 1e-5,
-        chunk_size: int = 256,
-        use_checkpointing: bool = True,
-        memory_efficient: bool = True,
-    ):
-        super().__init__()
-        
-        self.use_checkpointing = use_checkpointing
-        
-        # Use the optimized SSM kernel from previous implementation
-        self.ssm = OptimizedStateSpaceKernel(
-            d_model=d_model,
-            d_state=d_state,
-            d_conv=d_conv,
-            expand=expand,
-            chunk_size=chunk_size,
-            use_checkpointing=use_checkpointing,
-            memory_efficient=memory_efficient,
-        )
-        
-        self.norm = nn.LayerNorm(d_model, eps=layer_norm_eps)
-        self.dropout = nn.Dropout(dropout)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.use_checkpointing and self.training:
-            return checkpoint.checkpoint(self._forward_impl, x, use_reentrant=False)
-        else:
-            return self._forward_impl(x)
-    
-    def _forward_impl(self, x: torch.Tensor) -> torch.Tensor:
-        residual = x
-        x = self.norm(x)
-        x = self.ssm(x)
-        x = self.dropout(x)
-        return x + residual
-
-
-# Reuse OptimizedStateSpaceKernel from the previous implementation
-class OptimizedStateSpaceKernel(nn.Module):
-    """
-    Memory-Optimized State Space Model Kernel for CQT processing
-    Reduced state dimensions and optimized for music sequences
-    """
-    
-    def __init__(
-        self,
-        d_model: int,
-        d_state: int = 32,  # Reduced from 64
-        d_conv: int = 4,
-        expand: int = 2,
-        dt_rank: Optional[int] = None,
-        dt_min: float = 0.001,
-        dt_max: float = 0.1,
-        dt_init: str = "random",
-        dt_scale: float = 1.0,
-        bias: bool = True,
-        conv_bias: bool = True,
-        chunk_size: int = 256,
-        use_checkpointing: bool = True,
-        memory_efficient: bool = True,
-    ):
-        super().__init__()
-        
-        self.d_model = d_model
-        self.d_state = d_state
-        self.d_conv = d_conv
-        self.expand = expand
-        self.d_inner = d_model * expand
-        self.chunk_size = chunk_size
-        self.use_checkpointing = use_checkpointing
-        self.memory_efficient = memory_efficient
-        
-        dt_rank = dt_rank or math.ceil(d_model / 16)
-        
-        # Input projections
-        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=bias)
-        
-        # Efficient convolution
-        self.conv1d = nn.Conv1d(
-            in_channels=self.d_inner,
-            out_channels=self.d_inner,
-            bias=conv_bias,
-            kernel_size=d_conv,
-            groups=self.d_inner,  # Depthwise
-            padding=d_conv - 1,
-        )
-        
-        # SSM parameters (reduced dimensions)
-        self.x_proj = nn.Linear(self.d_inner, dt_rank + d_state * 2, bias=False)
-        self.dt_proj = nn.Linear(dt_rank, self.d_inner, bias=True)
-        
-        # Initialize dt projection
-        dt_init_std = dt_rank**-0.5 * dt_scale
-        if dt_init == "constant":
-            nn.init.constant_(self.dt_proj.weight, dt_init_std)
-        elif dt_init == "random":
-            nn.init.uniform_(self.dt_proj.weight, -dt_init_std, dt_init_std)
-        
-        # Initialize dt bias
-        dt = torch.exp(
-            torch.rand(self.d_inner) * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min)
-        ).clamp(min=dt_min)
-        inv_dt = dt + torch.log(-torch.expm1(-dt))
-        with torch.no_grad():
-            self.dt_proj.bias.copy_(inv_dt)
-        self.dt_proj.bias._no_reinit = True
-        
-        # S4D real initialization (reduced dimension)
-        A = torch.arange(1, d_state + 1, dtype=torch.float32).repeat(self.d_inner, 1)
-        self.A_log = nn.Parameter(torch.log(A))
-        self.A_log._no_weight_decay = True
-        
-        # D skip connection
-        self.D = nn.Parameter(torch.ones(self.d_inner))
-        self.D._no_weight_decay = True
-        
-        # Output projection
-        self.out_proj = nn.Linear(self.d_inner, d_model, bias=bias)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Optimized SSM forward pass for CQT sequences"""
-        B, L, D = x.shape
-        
-        if self.use_checkpointing and self.training and L > self.chunk_size * 2:
-            return checkpoint.checkpoint(self._forward_impl, x, use_reentrant=False)
-        else:
-            return self._forward_impl(x)
-    
-    def _forward_impl(self, x: torch.Tensor) -> torch.Tensor:
-        B, L, D = x.shape
-        
-        if L == 0:
-            return torch.zeros_like(x)
-        
-        # Input projection and split
-        xz = self.in_proj(x)
-        x, z = xz.chunk(2, dim=-1)
-        
-        # Convolution (causal)
-        x = x.transpose(1, 2)
-        x = self.conv1d(x)[..., :L]
-        x = x.transpose(1, 2)
-        x = F.silu(x)
-        
-        # SSM computation (optimized for shorter CQT sequences)
-        if self.memory_efficient and L > self.chunk_size:
-            x = self._chunked_ssm(x)
-        else:
-            x = self.ssm(x)
-        
-        # Gating
-        y = x * F.silu(z)
-        
-        return self.out_proj(y)
-    
-    def ssm(self, x: torch.Tensor) -> torch.Tensor:
-        """Core SSM computation optimized for CQT"""
-        B, L, D = x.shape
-        
-        if L == 0:
-            return torch.zeros_like(x)
-        
-        # Compute dt, B, C
-        x_dbl = self.x_proj(x)
-        dt, B_ssm, C = torch.split(x_dbl, [self.dt_proj.in_features, self.d_state, self.d_state], dim=-1)
-        
-        dt = self.dt_proj(dt)
-        dt = F.softplus(dt + self.dt_proj.bias)
-        
-        # Compute A
-        A = -torch.exp(self.A_log.float())
-        
-        # Efficient discretization for shorter sequences
-        A_discrete, B_discrete = self._efficient_discretize(A, B_ssm, dt)
-        
-        # SSM step
-        y = self._ssm_step(x, A_discrete, B_discrete, C, self.D)
-        
-        return y
-    
-    def _efficient_discretize(self, A, B, dt):
-        """Efficient discretization for CQT sequences"""
-        dt = dt.unsqueeze(-1)
-        A = A.unsqueeze(0).unsqueeze(0)
-        
-        # Zero-order hold discretization
-        dt_A = torch.clamp(dt * A, min=-10, max=10)
-        A_discrete = torch.exp(dt_A)
-        
-        # Efficient B computation
-        B_discrete = dt * B.unsqueeze(2)
-        
-        return A_discrete, B_discrete
-    
-    def _ssm_step(self, x, A, B, C, D):
-        """Efficient SSM step for CQT"""
-        B_batch, L, d_inner = x.shape
-        d_state = A.shape[-1]
-        
-        # Initialize state
-        h = torch.zeros(B_batch, d_inner, d_state, device=x.device, dtype=x.dtype)
-        
-        outputs = []
-        
-        for t in range(L):
-            x_t = x[:, t]
-            A_t = A[:, t]
-            B_t = B[:, t]
-            C_t = C[:, t]
-            
-            # State update
-            h = A_t * h + B_t * x_t.unsqueeze(-1)
-            
-            # Output
-            y_t = torch.sum(h * C_t.unsqueeze(1), dim=-1) + D * x_t
-            outputs.append(y_t)
-        
-        return torch.stack(outputs, dim=1)
-    
-    def _chunked_ssm(self, x: torch.Tensor) -> torch.Tensor:
-        """Process in chunks for memory efficiency"""
-        B, L, D = x.shape
-        
-        outputs = []
-        h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=x.dtype)
-        
-        for start in range(0, L, self.chunk_size):
-            end = min(start + self.chunk_size, L)
-            chunk = x[:, start:end]
-            
-            chunk_out = self.ssm(chunk)
-            outputs.append(chunk_out)
-            
-            # Memory cleanup
-            if start % (self.chunk_size * 4) == 0:
-                torch.cuda.empty_cache()
-        
-        return torch.cat(outputs, dim=1)
+    def _process_ssm_blocks(self, x_seq, ssm_blocks):
+        """Process sequence through list of SSM blocks"""
+        for ssm_block in ssm_blocks:
+            x_seq = ssm_block(x_seq)
+        return x_seq
 
 
 # ==================== CQT-SSM Decoder ====================
@@ -907,6 +742,7 @@ class OptimizedStateSpaceKernel(nn.Module):
 class CQTSSMDecoder(nn.Module):
     """
     CQT-based SSM decoder with inverse CQT transformation
+    Now using unified SSM components
     """
     
     def __init__(
@@ -916,7 +752,7 @@ class CQTSSMDecoder(nn.Module):
         n_bins: int = 84,
         ssm_layers: List[int] = [2, 3, 3, 2, 2],
         output_channels: int = 2,
-        d_state: int = 32,
+        d_state: int = 64,
         use_multiscale_ssm: bool = True,
         dropout: float = 0.1,
         use_weight_norm: bool = True,
@@ -949,7 +785,7 @@ class CQTSSMDecoder(nn.Module):
         # Skip connection projections
         self.skip_projections = nn.ModuleList()
         
-        # Decoder stages
+        # Decoder stages with unified SSM
         self.stages = nn.ModuleList()
         current_channels = initial_channels
         
@@ -981,23 +817,27 @@ class CQTSSMDecoder(nn.Module):
             if use_weight_norm:
                 upsample[0] = nn.utils.weight_norm(upsample[0])
             
-            # SSM processing
+            # SSM processing using unified components
             if i < self.num_stages - 1:
-                ssm_processor = MultiScaleSSM(
-                    d_model=out_channels,
-                    scales=[1, 2] if out_channels >= 128 else [1],
-                    d_state=d_state,
-                    dropout=dropout
-                ) if use_multiscale_ssm else nn.ModuleList([
-                    CQTSSMBlock(
+                if use_multiscale_ssm:
+                    ssm_processor = EnhancedMultiScaleSSM(
                         d_model=out_channels,
+                        scales=[1, 2] if out_channels >= 128 else [1],
                         d_state=d_state,
                         dropout=dropout,
-                        chunk_size=chunk_size,
-                        use_checkpointing=use_checkpointing,
-                        memory_efficient=memory_efficient,
-                    ) for _ in range(ssm_layers[i])
-                ])
+                        use_harmonic_enhancement=True,
+                        frequency_aware=True
+                    )
+                else:
+                    ssm_processor = nn.ModuleList([
+                        CQTSSMBlock(
+                            d_model=out_channels,
+                            d_state=d_state,
+                            dropout=dropout,
+                            use_frequency_conditioning=True,
+                            use_harmonic_bias=True,
+                        ) for _ in range(ssm_layers[i])
+                    ])
             else:
                 ssm_processor = nn.Identity()
             
@@ -1039,7 +879,7 @@ class CQTSSMDecoder(nn.Module):
     
     def forward(self, latent: torch.Tensor, skip_features: List[torch.Tensor]) -> torch.Tensor:
         """
-        Decode latent to audio using CQT and SSM
+        Decode latent to audio using CQT and unified SSM
         
         Args:
             latent: (B, latent_channels, H, W)
@@ -1080,20 +920,31 @@ class CQTSSMDecoder(nn.Module):
             # Upsampling
             x = stage['upsample'](x)
             
-            # SSM processing with dimension validation
+            # SSM processing using unified components
             if not isinstance(stage['ssm_processor'], nn.Identity):
                 B, C, H, W = x.shape
                 
                 if H * W > 0:
                     x_seq = x.permute(0, 2, 3, 1).contiguous().view(B * H, W, C)
                     
-                    if self.use_checkpointing and self.training:
-                        x_seq = checkpoint.checkpoint(
-                            self._process_ssm, x_seq, stage['ssm_processor'],
-                            use_reentrant=False
-                        )
+                    if isinstance(stage['ssm_processor'], EnhancedMultiScaleSSM):
+                        # Enhanced MultiScale SSM
+                        if self.use_checkpointing and self.training:
+                            x_seq = checkpoint.checkpoint(
+                                stage['ssm_processor'], x_seq,
+                                use_reentrant=False
+                            )
+                        else:
+                            x_seq = stage['ssm_processor'](x_seq)
                     else:
-                        x_seq = self._process_ssm(x_seq, stage['ssm_processor'])
+                        # List of CQTSSMBlocks
+                        if self.use_checkpointing and self.training:
+                            x_seq = checkpoint.checkpoint(
+                                self._process_ssm_blocks, x_seq, stage['ssm_processor'],
+                                use_reentrant=False
+                            )
+                        else:
+                            x_seq = self._process_ssm_blocks(x_seq, stage['ssm_processor'])
                     
                     x = x_seq.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
         
@@ -1108,14 +959,11 @@ class CQTSSMDecoder(nn.Module):
         
         return audio
     
-    def _process_ssm(self, x_seq, ssm_processor):
-        """Process sequence through SSM"""
-        if isinstance(ssm_processor, MultiScaleSSM):
-            return ssm_processor(x_seq)
-        else:
-            for ssm_block in ssm_processor:
-                x_seq = ssm_block(x_seq)
-            return x_seq
+    def _process_ssm_blocks(self, x_seq, ssm_blocks):
+        """Process sequence through list of SSM blocks"""
+        for ssm_block in ssm_blocks:
+            x_seq = ssm_block(x_seq)
+        return x_seq
 
 
 # ==================== Enhanced CQT Loss ====================
@@ -1243,7 +1091,7 @@ class CQTLoss(nn.Module):
 class CQTSSMDCAE(nn.Module):
     """
     Complete CQT-SSM-based DCAE with Harmonic-Percussive separation
-    Superior music understanding with SSM advantages maintained
+    Now using unified SSM components for better consistency and performance
     """
     
     def __init__(
@@ -1260,7 +1108,7 @@ class CQTSSMDCAE(nn.Module):
         dropout: float = 0.1,
         use_weight_norm: bool = True,
         use_multiscale_ssm: bool = True,
-        d_state: int = 32,
+        d_state: int = 64,
         # Memory optimization
         chunk_size: int = 256,
         use_checkpointing: bool = True,
@@ -1275,7 +1123,7 @@ class CQTSSMDCAE(nn.Module):
         self.n_bins = n_bins
         self.hop_length = hop_length
         
-        # CQT-SSM Encoder
+        # CQT-SSM Encoder using unified SSM components
         self.encoder = CQTSSMEncoder(
             sample_rate=sample_rate,
             n_bins=n_bins,
@@ -1305,7 +1153,7 @@ class CQTSSMDCAE(nn.Module):
                 print("Warning: vector_quantize_pytorch not available, disabling VQ")
                 self.use_vq = False
         
-        # CQT-SSM Decoder
+        # CQT-SSM Decoder using unified SSM components
         self.decoder = CQTSSMDecoder(
             latent_channels=latent_channels,
             base_channels=decoder_base_channels,
@@ -1339,11 +1187,11 @@ class CQTSSMDCAE(nn.Module):
                 nn.init.constant_(m.bias, 0)
     
     def encode(self, audio: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
-        """Encode audio to latent using CQT and SSM"""
+        """Encode audio to latent using CQT and unified SSM"""
         return self.encoder(audio)
     
     def decode(self, latent: torch.Tensor, skip_features: List[torch.Tensor]) -> torch.Tensor:
-        """Decode latent to audio using CQT and SSM"""
+        """Decode latent to audio using CQT and unified SSM"""
         return self.decoder(latent, skip_features)
     
     def forward(
@@ -1351,11 +1199,11 @@ class CQTSSMDCAE(nn.Module):
         audio: torch.Tensor,
         return_loss: bool = True
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
-        """Complete forward pass with CQT-SSM processing"""
+        """Complete forward pass with CQT-SSM processing using unified components"""
         # Store original length
         original_length = audio.shape[-1]
         
-        # Encode using CQT and SSM
+        # Encode using CQT and unified SSM
         latent, skip_features = self.encode(audio)
         
         # Vector quantization (if enabled)
@@ -1363,7 +1211,7 @@ class CQTSSMDCAE(nn.Module):
         if self.use_vq and hasattr(self, 'quantizer'):
             latent, vq_loss, _ = self.quantizer(latent)
         
-        # Decode using SSM and inverse CQT
+        # Decode using unified SSM and inverse CQT
         reconstructed = self.decode(latent, skip_features)
         
         # Ensure reconstructed audio has the same length as input with enhanced padding
@@ -1388,7 +1236,7 @@ class CQTSSMDCAE(nn.Module):
             # Return consistent loss dictionary with CQT terminology
             loss_dict = {
                 'total_loss': total_loss,
-                'cqt_loss': cqt_loss,  # Changed from stft_loss for consistency
+                'cqt_loss': cqt_loss,  # CQT-based loss
                 'time_loss': time_loss,
                 'vq_loss': vq_loss
             }
@@ -1414,6 +1262,7 @@ class CQTSSMDCAE(nn.Module):
         """Get memory optimization configuration"""
         return {
             'representation': 'CQT + Harmonic-Percussive',
+            'ssm_components': 'Unified SSM (StateSpaceKernel, SSMBlock, MultiScaleSSM)',
             'n_bins': self.n_bins,
             'hop_length': self.hop_length,
             'compression_ratio': f'{self.get_compression_ratio():.1f}x',
@@ -1442,7 +1291,7 @@ def create_cqt_ssm_dcae(
     checkpointing_segments: int = 4,
     **kwargs
 ) -> CQTSSMDCAE:
-    """Create CQT-SSM-based DCAE model with music-optimized settings"""
+    """Create CQT-SSM-based DCAE model with unified SSM components"""
     
     if model_size == "small":
         base_config = {
@@ -1451,7 +1300,7 @@ def create_cqt_ssm_dcae(
             "latent_channels": 6,
             "n_bins": 72,  # 6 octaves
         }
-        effective_d_state = d_state or 16
+        effective_d_state = d_state or 32
         effective_chunk_size = 128
     elif model_size == "base":
         base_config = {
@@ -1460,7 +1309,7 @@ def create_cqt_ssm_dcae(
             "latent_channels": 8,
             "n_bins": 84,  # 7 octaves
         }
-        effective_d_state = d_state or 32
+        effective_d_state = d_state or 64
         effective_chunk_size = chunk_size
     elif model_size == "large":
         base_config = {
@@ -1469,7 +1318,7 @@ def create_cqt_ssm_dcae(
             "latent_channels": 12,
             "n_bins": 96,  # 8 octaves
         }
-        effective_d_state = d_state or 48
+        effective_d_state = d_state or 96
         effective_chunk_size = chunk_size * 2
     else:
         raise ValueError(f"Unknown model size: {model_size}")
@@ -1506,7 +1355,7 @@ def create_cqt_ssm_dcae(
 
 # Alias for backward compatibility with existing training scripts
 def create_memory_optimized_lyro_dcae(*args, **kwargs):
-    """Backward compatibility wrapper - now uses CQT-SSM implementation"""
+    """Backward compatibility wrapper - now uses unified CQT-SSM implementation"""
     return create_cqt_ssm_dcae(*args, **kwargs)
 
 def create_enhanced_lyro_dcae(*args, **kwargs):
