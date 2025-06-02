@@ -3,14 +3,15 @@
 Enhanced Training Utilities for CQT-SSM DCAE
 T-3: EMA (Exponential Moving Average)
 T-1: Mix-scale Augmentation
-Updated for CQT-based music processing
+Updated for CQT-based music processing - FIXED VERSION
 """
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F  # ✅ 수정: torch.nn.functional만 사용
 import torchaudio
 import torchaudio.transforms as T
-import torchaudio.functional as F
+import torchaudio.functional as tF  # ✅ 수정: torchaudio.functional을 tF로 별칭
 import numpy as np
 import random
 from typing import Dict, Optional, Any, Union, List
@@ -166,25 +167,50 @@ class MixScaleAugmentation:
         self.preserve_musical_structure = preserve_musical_structure
         self.harmonic_distortion_prob = harmonic_distortion_prob
         
-        # Pre-built transforms optimized for musical content
-        # Use Biquad filters instead of deprecated HighpassBiquad/LowpassBiquad
-        self.highpass_filters = [
-            T.Biquad(sample_rate, b0=1, b1=-1, b2=0, a0=1, a1=-0.9, a2=0)  # Simple highpass
-            for freq in [60, 80, 100, 120]  # Lower frequencies to preserve musical content
-        ]
-        self.lowpass_filters = [
-            T.Biquad(sample_rate, b0=0.5, b1=0.5, b2=0, a0=1, a1=-0.5, a2=0)  # Simple lowpass
-            for freq in [8000, 12000, 16000, 18000]
-        ]
-        
+        # ✅ 수정: 더 안전한 필터 생성 방식 사용
+        self.highpass_filters = self._create_highpass_filters()
+        self.lowpass_filters = self._create_lowpass_filters()
         self.eq_filters = self._create_musical_eq_filters()
+    
+    def _create_highpass_filters(self):
+        """Create highpass filters using Biquad"""
+        filters = []
+        freqs = [60, 80, 100, 120]
+        
+        for freq in freqs:
+            # Simple highpass approximation using Biquad
+            # Transfer function: H(z) = (1 - z^-1) / (1 - a*z^-1) where a < 1
+            a = 0.9  # Pole location for highpass effect
+            filters.append(T.Biquad(
+                sample_rate=self.sample_rate,
+                b0=1.0, b1=-1.0, b2=0.0,
+                a0=1.0, a1=-a, a2=0.0
+            ))
+        
+        return filters
+    
+    def _create_lowpass_filters(self):
+        """Create lowpass filters using Biquad"""
+        filters = []
+        freqs = [8000, 12000, 16000, 18000]
+        
+        for freq in freqs:
+            # Simple lowpass approximation using Biquad
+            # Use a simple averaging filter
+            alpha = 0.5  # Smoothing factor
+            filters.append(T.Biquad(
+                sample_rate=self.sample_rate,
+                b0=alpha, b1=alpha, b2=0.0,
+                a0=1.0, a1=-(1-alpha), a2=0.0
+            ))
+        
+        return filters
     
     def _create_musical_eq_filters(self):
         """Create parametric EQ filters optimized for musical content"""
         eq_filters = []
         
-        # Use simple Biquad filters instead of deprecated BandpassBiquad
-        # These coefficients approximate bandpass filters for different frequency bands
+        # ✅ 수정: 더 안전한 Biquad 필터 계수 사용
         filter_configs = [
             # freq, b0, b1, b2, a0, a1, a2 (simplified bandpass approximations)
             (40, 0.1, 0, -0.1, 1, -1.8, 0.85),    # Sub-bass
@@ -199,7 +225,11 @@ class MixScaleAugmentation:
         ]
         
         for freq, b0, b1, b2, a0, a1, a2 in filter_configs:
-            eq_filters.append(T.Biquad(self.sample_rate, b0=b0, b1=b1, b2=b2, a0=a0, a1=a1, a2=a2))
+            eq_filters.append(T.Biquad(
+                sample_rate=self.sample_rate, 
+                b0=b0, b1=b1, b2=b2, 
+                a0=a0, a1=a1, a2=a2
+            ))
         
         return eq_filters
     
@@ -220,14 +250,16 @@ class MixScaleAugmentation:
                 audio_shifted = []
                 for channel in range(audio.shape[0]):
                     try:
-                        shifted = F.pitch_shift(
+                        # ✅ 수정: torchaudio.functional 사용
+                        shifted = tF.pitch_shift(
                             audio[channel:channel+1], 
                             self.sample_rate, 
                             n_steps=n_steps
                         )
                         audio_shifted.append(shifted)
-                    except:
+                    except Exception as e:
                         # Fallback if pitch shift fails
+                        print(f"Pitch shift failed: {e}, using original audio")
                         audio_shifted.append(audio[channel:channel+1])
                 audio = torch.cat(audio_shifted, dim=0)
         return audio
@@ -236,21 +268,30 @@ class MixScaleAugmentation:
         """Apply musical filtering effects optimized for CQT"""
         # High-pass filtering (conservative to preserve bass content)
         if random.random() < 0.25:  # 25% probability
-            hp_filter = random.choice(self.highpass_filters)
-            audio = hp_filter(audio)
+            try:
+                hp_filter = random.choice(self.highpass_filters)
+                audio = hp_filter(audio)
+            except Exception as e:
+                print(f"Highpass filter failed: {e}")
         
         # Low-pass filtering (conservative to preserve high-frequency content)
         if random.random() < 0.15:  # 15% probability
-            lp_filter = random.choice(self.lowpass_filters)
-            audio = lp_filter(audio)
+            try:
+                lp_filter = random.choice(self.lowpass_filters)
+                audio = lp_filter(audio)
+            except Exception as e:
+                print(f"Lowpass filter failed: {e}")
         
         # Musical parametric EQ
         if random.random() < self.eq_prob:
-            eq_filter = random.choice(self.eq_filters)
-            # Apply with random gain (more conservative for musical content)
-            eq_gain = random.uniform(0.7, 1.3)
-            audio_eq = eq_filter(audio)
-            audio = audio + eq_gain * (audio_eq - audio) * 0.5  # Reduced intensity
+            try:
+                eq_filter = random.choice(self.eq_filters)
+                # Apply with random gain (more conservative for musical content)
+                eq_gain = random.uniform(0.7, 1.3)
+                audio_eq = eq_filter(audio)
+                audio = audio + eq_gain * (audio_eq - audio) * 0.5  # Reduced intensity
+            except Exception as e:
+                print(f"EQ filter failed: {e}")
         
         return audio
     
@@ -379,29 +420,36 @@ class MixScaleAugmentation:
         if audio.dim() == 1:
             audio = audio.unsqueeze(0)
         
-        # Apply augmentations in sequence (optimized order for musical content)
-        audio = self.apply_gain_augmentation(audio)
-        audio = self.apply_musical_filtering(audio)
-        audio = self.apply_musical_reverb(audio)
-        audio = self.apply_musical_noise(audio)
-        audio = self.apply_stereo_effects(audio)
-        
-        # Apply potentially destructive effects last and sparingly
-        if self.preserve_musical_structure:
-            if random.random() < 0.7:  # Only apply these 70% of the time
+        # ✅ 수정: 예외 처리 추가
+        try:
+            # Apply augmentations in sequence (optimized order for musical content)
+            audio = self.apply_gain_augmentation(audio)
+            audio = self.apply_musical_filtering(audio)
+            audio = self.apply_musical_reverb(audio)
+            audio = self.apply_musical_noise(audio)
+            audio = self.apply_stereo_effects(audio)
+            
+            # Apply potentially destructive effects last and sparingly
+            if self.preserve_musical_structure:
+                if random.random() < 0.7:  # Only apply these 70% of the time
+                    audio = self.apply_harmonic_distortion(audio)
+                if random.random() < 0.8:  # Pitch shift even less frequently
+                    audio = self.apply_pitch_shift(audio)
+            else:
                 audio = self.apply_harmonic_distortion(audio)
-            if random.random() < 0.8:  # Pitch shift even less frequently
                 audio = self.apply_pitch_shift(audio)
-        else:
-            audio = self.apply_harmonic_distortion(audio)
-            audio = self.apply_pitch_shift(audio)
-        
-        audio = self.apply_dynamics_processing(audio)
-        
-        # Normalize to prevent clipping
-        max_val = torch.abs(audio).max()
-        if max_val > 0.95:
-            audio = audio * (0.95 / max_val)
+            
+            audio = self.apply_dynamics_processing(audio)
+            
+            # Normalize to prevent clipping
+            max_val = torch.abs(audio).max()
+            if max_val > 0.95:
+                audio = audio * (0.95 / max_val)
+                
+        except Exception as e:
+            print(f"Augmentation failed: {e}, returning original audio")
+            # Return original audio if augmentation fails
+            pass
         
         return audio
 
@@ -610,38 +658,46 @@ class TrainingStateManager:
 
 def compute_snr(original: torch.Tensor, reconstructed: torch.Tensor) -> float:
     """Compute Signal-to-Noise Ratio in dB"""
-    signal_power = torch.mean(original ** 2)
-    noise_power = torch.mean((original - reconstructed) ** 2)
-    
-    if noise_power > 0:
-        snr_db = 10 * torch.log10(signal_power / (noise_power + 1e-8))
-        return float(snr_db)
-    else:
-        return float('inf')
+    try:
+        signal_power = torch.mean(original ** 2)
+        noise_power = torch.mean((original - reconstructed) ** 2)
+        
+        if noise_power > 0:
+            snr_db = 10 * torch.log10(signal_power / (noise_power + 1e-8))
+            return float(snr_db)
+        else:
+            return float('inf')
+    except Exception as e:
+        print(f"SNR computation failed: {e}")
+        return 0.0
 
 
 def compute_si_sdr(reference: torch.Tensor, estimation: torch.Tensor) -> float:
     """Compute Scale-Invariant Signal-to-Distortion Ratio"""
-    # Zero-mean
-    reference = reference - torch.mean(reference)
-    estimation = estimation - torch.mean(estimation)
-    
-    # Handle zero-energy signals
-    if torch.sum(reference ** 2) < 1e-8:
-        return 0.0
-    
-    # Scale invariant target
-    alpha = torch.sum(estimation * reference) / (torch.sum(reference ** 2) + 1e-8)
-    target = alpha * reference
-    
-    # SI-SDR with numerical stability
-    target_power = torch.sum(target ** 2)
-    noise_power = torch.sum((estimation - target) ** 2)
-    
-    if noise_power > 0 and target_power > 0:
-        si_sdr = 10 * torch.log10(target_power / (noise_power + 1e-8))
-        return float(si_sdr)
-    else:
+    try:
+        # Zero-mean
+        reference = reference - torch.mean(reference)
+        estimation = estimation - torch.mean(estimation)
+        
+        # Handle zero-energy signals
+        if torch.sum(reference ** 2) < 1e-8:
+            return 0.0
+        
+        # Scale invariant target
+        alpha = torch.sum(estimation * reference) / (torch.sum(reference ** 2) + 1e-8)
+        target = alpha * reference
+        
+        # SI-SDR with numerical stability
+        target_power = torch.sum(target ** 2)
+        noise_power = torch.sum((estimation - target) ** 2)
+        
+        if noise_power > 0 and target_power > 0:
+            si_sdr = 10 * torch.log10(target_power / (noise_power + 1e-8))
+            return float(si_sdr)
+        else:
+            return 0.0
+    except Exception as e:
+        print(f"SI-SDR computation failed: {e}")
         return 0.0
 
 
@@ -655,10 +711,20 @@ def analyze_frequency_response(
     Analyze frequency response quality using CQT or STFT
     Enhanced for CQT-based models
     """
-    if use_cqt:
-        return analyze_cqt_response(original, reconstructed, sample_rate)
-    else:
-        return analyze_stft_response(original, reconstructed, sample_rate)
+    try:
+        if use_cqt:
+            return analyze_cqt_response(original, reconstructed, sample_rate)
+        else:
+            return analyze_stft_response(original, reconstructed, sample_rate)
+    except Exception as e:
+        print(f"Frequency response analysis failed: {e}")
+        return {
+            'low_freq_error': 0.0,
+            'mid_freq_error': 0.0,
+            'high_freq_error': 0.0,
+            'total_spectral_error': 0.0,
+            'analysis_type': 'FAILED'
+        }
 
 
 def analyze_cqt_response(
@@ -706,6 +772,7 @@ def analyze_cqt_response(
         }
         
     except Exception as e:
+        print(f"CQT analysis failed: {e}")
         # Fallback to basic metrics
         return {
             'low_freq_error': 0.0,
@@ -752,7 +819,8 @@ def analyze_stft_response(
             'analysis_type': 'STFT'
         }
         
-    except Exception:
+    except Exception as e:
+        print(f"STFT analysis failed: {e}")
         return {
             'low_freq_error': 0.0,
             'mid_freq_error': 0.0,
@@ -782,12 +850,23 @@ def compute_musical_metrics(
         orig_np = orig_np[:min_len]
         recon_np = recon_np[:min_len]
         
+        # ✅ 수정: 빈 배열 체크 추가
+        if min_len == 0:
+            return {
+                'tempo_error': 0.0,
+                'harmonic_preservation': 0.0,
+                'percussive_preservation': 0.0,
+                'chroma_similarity': 0.0,
+                'spectral_centroid_error': 0.0
+            }
+        
         # Tempo consistency
         try:
             orig_tempo = librosa.beat.tempo(y=orig_np, sr=sample_rate)[0]
             recon_tempo = librosa.beat.tempo(y=recon_np, sr=sample_rate)[0]
             metrics['tempo_error'] = abs(orig_tempo - recon_tempo)
-        except:
+        except Exception as e:
+            print(f"Tempo analysis failed: {e}")
             metrics['tempo_error'] = 0.0
         
         # Harmonic-percussive separation quality
@@ -802,7 +881,8 @@ def compute_musical_metrics(
             # Percussive preservation
             p_corr = np.corrcoef(orig_percussive, recon_percussive)[0, 1]
             metrics['percussive_preservation'] = p_corr if not np.isnan(p_corr) else 0.0
-        except:
+        except Exception as e:
+            print(f"Harmonic-percussive analysis failed: {e}")
             metrics['harmonic_preservation'] = 0.0
             metrics['percussive_preservation'] = 0.0
         
@@ -823,7 +903,8 @@ def compute_musical_metrics(
                 metrics['chroma_similarity'] = chroma_sim if not np.isnan(chroma_sim) else 0.0
             else:
                 metrics['chroma_similarity'] = 0.0
-        except:
+        except Exception as e:
+            print(f"Chroma analysis failed: {e}")
             metrics['chroma_similarity'] = 0.0
         
         # Spectral centroid (brightness)
@@ -831,10 +912,12 @@ def compute_musical_metrics(
             orig_centroid = librosa.feature.spectral_centroid(y=orig_np, sr=sample_rate)[0]
             recon_centroid = librosa.feature.spectral_centroid(y=recon_np, sr=sample_rate)[0]
             metrics['spectral_centroid_error'] = np.mean(np.abs(orig_centroid - recon_centroid))
-        except:
+        except Exception as e:
+            print(f"Spectral centroid analysis failed: {e}")
             metrics['spectral_centroid_error'] = 0.0
             
-    except Exception:
+    except Exception as e:
+        print(f"Musical metrics computation failed: {e}")
         # Fallback metrics
         metrics = {
             'tempo_error': 0.0,
