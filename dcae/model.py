@@ -1289,9 +1289,13 @@ def create_cqt_ssm_dcae(
     use_checkpointing: bool = True,
     memory_efficient: bool = True,
     checkpointing_segments: int = 4,
+    # Performance optimization parameters
+    use_torch_compile: bool = True,
+    use_mixed_precision: bool = True,
+    compile_mode: str = "default",  # "default", "reduce-overhead", "max-autotune"
     **kwargs
 ) -> CQTSSMDCAE:
-    """Create CQT-SSM-based DCAE model with unified SSM components"""
+    """Create CQT-SSM-based DCAE model with unified SSM components and performance optimizations"""
     
     if model_size == "small":
         base_config = {
@@ -1336,7 +1340,7 @@ def create_cqt_ssm_dcae(
     final_config.update(base_config)
     final_config.update({k: v for k, v in kwargs.items() if k in model_init_params})
     
-    return CQTSSMDCAE(
+    model = CQTSSMDCAE(
         sample_rate=sample_rate,
         use_vector_quantization=use_vq,
         use_weight_norm=use_weight_norm,
@@ -1349,6 +1353,39 @@ def create_cqt_ssm_dcae(
         checkpointing_segments=checkpointing_segments,
         **final_config
     )
+      # Performance optimizations
+    if use_torch_compile and torch.__version__ >= "2.0.0":
+        try:
+            print(f"🚀 Applying torch.compile() with mode '{compile_mode}'...")
+            
+            # Check for Triton availability and use safer compile mode on Windows
+            import platform
+            if platform.system() == "Windows":
+                # Use reduce-overhead mode to avoid Triton issues on Windows
+                safe_compile_mode = "reduce-overhead" if compile_mode == "default" else compile_mode
+                print(f"Windows detected, using safer compile mode: {safe_compile_mode}")
+            else:
+                safe_compile_mode = compile_mode
+            
+            # Compile the encoder and decoder separately for better optimization
+            model.encoder = torch.compile(model.encoder, mode=safe_compile_mode)
+            model.decoder = torch.compile(model.decoder, mode=safe_compile_mode)
+            
+            # Optionally compile the full model for end-to-end optimization
+            # model = torch.compile(model, mode=safe_compile_mode)
+            
+            print("✅ torch.compile() applied successfully")
+        except Exception as e:
+            print(f"⚠️ torch.compile() failed: {e}")
+            print("Continuing without compilation...")
+            # Disable torch.compile for this model instance
+            use_torch_compile = False
+    
+    # Set mixed precision flag for training loops to use
+    model._use_mixed_precision = use_mixed_precision
+    model._compile_mode = compile_mode if use_torch_compile else None
+    
+    return model
 
 
 # ==================== Backward Compatibility ====================

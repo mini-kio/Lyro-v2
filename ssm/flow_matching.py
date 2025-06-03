@@ -720,20 +720,69 @@ class FlowConfig:
 
 def create_flow_matching(
     model: nn.Module,
-    config: Optional[FlowConfig] = None
+    config: Optional[FlowConfig] = None,
+    use_torch_compile: bool = True,
+    compile_mode: str = "default"
 ) -> LyroFlowMatching:
-    """Create flow matching model with config"""
+    """
+    Create flow matching model with config and optimization support
+    
+    Args:
+        model: Backbone neural network model
+        config: Flow matching configuration
+        use_torch_compile: Enable torch.compile() optimization
+        compile_mode: Compilation mode ("default", "reduce-overhead", "max-autotune")
+        
+    Returns:
+        Optimized LyroFlowMatching model
+    """
     
     if config is None:
         config = FlowConfig()
     
-    return LyroFlowMatching(
+    # Create flow matching model
+    flow_matching = LyroFlowMatching(
         model=model,
         scheduler_type=config.scheduler_type,
         solver_type=config.solver_type,
         sigma=config.sigma,
         flow_type=config.flow_type,
     )
+      # Apply torch.compile() if requested
+    if use_torch_compile and hasattr(torch, 'compile'):
+        try:
+            print(f"Applying torch.compile() to FlowMatching model with mode: {compile_mode}")
+            
+            # Check for Triton availability and use safer compile mode on Windows
+            import platform
+            if platform.system() == "Windows":
+                # Use reduce-overhead mode to avoid Triton issues on Windows
+                safe_compile_mode = "reduce-overhead" if compile_mode == "default" else compile_mode
+                print(f"Windows detected, using safer compile mode: {safe_compile_mode}")
+            else:
+                safe_compile_mode = compile_mode
+            
+            # Compile the velocity model
+            flow_matching.model = torch.compile(
+                flow_matching.model, 
+                mode=safe_compile_mode
+            )
+            
+            # Store compilation info
+            flow_matching._use_torch_compile = True
+            flow_matching._compile_mode = safe_compile_mode
+            
+            print("✓ torch.compile() applied successfully to FlowMatching")
+            
+        except Exception as e:
+            print(f"Warning: torch.compile() failed: {e}")
+            print("Continuing without compilation...")
+            flow_matching._use_torch_compile = False
+            use_torch_compile = False
+    else:
+        flow_matching._use_torch_compile = False
+    
+    return flow_matching
 
 
 def benchmark_flow_matching(

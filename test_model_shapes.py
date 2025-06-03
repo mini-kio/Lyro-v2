@@ -10,30 +10,32 @@ import os
 # 경로 설정
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from ssm.model import LyroSSMUNet
-from ssm.flow_matching import LyroFlowMatching, FlowConfig
+from ssm.model import create_lyro_ssm_model
+from ssm.flow_matching import create_flow_matching, FlowConfig
 
 def test_model_shapes():
-    """모델의 텐서 모양이 올바른지 테스트"""
-    print("=== Lyro SSM 모델 텐서 모양 테스트 ===")
+    """모델의 텐서 모양이 올바른지 테스트 (최적화된 모델 사용)"""
+    print("=== Lyro SSM 모델 텐서 모양 테스트 (torch.compile + Mixed Precision) ===")
     
     # 모델 설정
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"사용 디바이스: {device}")
-    
-    # 모델 생성
-    print("\n1. LyroSSMUNet 모델 생성 중...")
+      # 최적화된 모델 생성 (Triton 이슈 우회)
+    print("\n1. 최적화된 LyroSSMUNet 모델 생성 중...")
     try:
-        model = LyroSSMUNet(
+        # Windows에서 torch.compile 이슈 우회
+        import platform
+        use_compile = platform.system() != "Windows"
+        
+        model = create_lyro_ssm_model(
             input_channels=8,
-            hidden_dims=[128, 256, 384, 512],
-            ssm_layers=[2, 3, 4, 4],
-            d_state=64,
+            model_size="base",
             max_seq_len=8192,
-            dropout=0.1,
-            use_multiscale_ssm=True,
+            use_torch_compile=use_compile,
+            use_mixed_precision=True,
+            compile_mode="reduce-overhead" if use_compile else "default"
         ).to(device)
-        print("✅ 모델 생성 성공")
+        print("✅ 최적화된 모델 생성 성공")
         
         # 모델 파라미터 개수 출력
         total_params = sum(p.numel() for p in model.parameters())
@@ -104,20 +106,22 @@ def test_model_shapes():
         print(f"❌ Forward pass 실패: {e}")
         import traceback
         traceback.print_exc()
-        return False
-      # Flow Matching 모델 테스트
-    print("\n4. Flow Matching 모델 테스트 중...")
+        return False    # 최적화된 Flow Matching 모델 테스트 (Triton 이슈 우회)
+    print("\n4. 최적화된 Flow Matching 모델 테스트 중...")
     try:
         config = FlowConfig()
         
-        flow_model = LyroFlowMatching(
+        # Windows에서 torch.compile 이슈 우회
+        import platform
+        use_compile = platform.system() != "Windows"
+        
+        flow_model = create_flow_matching(
             model=model,
-            scheduler_type="cosine",
-            solver_type="heun",
-            sigma=1e-4,
-            flow_type="rectified"
+            config=config,
+            use_torch_compile=use_compile,
+            compile_mode="reduce-overhead" if use_compile else "default"
         ).to(device)
-        print("✅ Flow Matching 모델 생성 성공")          # Flow Matching generate 테스트
+        print("✅ 최적화된 Flow Matching 모델 생성 성공")# Flow Matching generate 테스트
         with torch.no_grad():
             # 잠재 공간 출력 형태 (DCAE 출력 가정)
             latent_dim = 8  # SSM 모델의 입력 채널과 일치

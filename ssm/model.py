@@ -809,9 +809,26 @@ def create_lyro_ssm_model(
     input_channels: int = 8,
     model_size: str = "base",  # "small", "base", "large"
     max_seq_len: int = 8192,
+    use_torch_compile: bool = True,
+    use_mixed_precision: bool = True,
+    compile_mode: str = "default",
     **kwargs
 ) -> LyroSSMUNet:
-    """Factory function to create Lyro SSM models"""
+    """
+    Factory function to create Lyro SSM models with optimization support
+    
+    Args:
+        input_channels: Number of input channels
+        model_size: Model size configuration ("small", "base", "large")
+        max_seq_len: Maximum sequence length
+        use_torch_compile: Enable torch.compile() optimization
+        use_mixed_precision: Enable Mixed Precision training support
+        compile_mode: Compilation mode ("default", "reduce-overhead", "max-autotune")
+        **kwargs: Additional model configuration
+        
+    Returns:
+        Optimized LyroSSMUNet model
+    """
     
     if model_size == "small":
         config = {
@@ -837,8 +854,53 @@ def create_lyro_ssm_model(
     # Override with kwargs
     config.update(kwargs)
     
-    return LyroSSMUNet(
+    # Create model
+    model = LyroSSMUNet(
         input_channels=input_channels,
         max_seq_len=max_seq_len,
         **config
     )
+    
+    # Add optimization flags
+    model._use_mixed_precision = use_mixed_precision
+    model._compile_mode = compile_mode
+      # Apply torch.compile() if requested
+    if use_torch_compile and hasattr(torch, 'compile'):
+        try:
+            print(f"Applying torch.compile() to LyroSSMUNet with mode: {compile_mode}")
+            
+            # Check for Triton availability and use safer compile mode on Windows
+            import platform
+            if platform.system() == "Windows":
+                # Use reduce-overhead mode to avoid Triton issues on Windows
+                safe_compile_mode = "reduce-overhead" if compile_mode == "default" else compile_mode
+                print(f"Windows detected, using safer compile mode: {safe_compile_mode}")
+            else:
+                safe_compile_mode = compile_mode
+            
+            # Compile key components
+            model.condition_embedding = torch.compile(
+                model.condition_embedding, 
+                mode=safe_compile_mode
+            )
+            
+            # Compile SSM layers
+            for encoder in model.encoders:
+                for ssm_layer in encoder.ssm_layers:
+                    ssm_layer = torch.compile(ssm_layer, mode=safe_compile_mode)
+            
+            model.bottleneck = torch.compile(model.bottleneck, mode=safe_compile_mode)
+            
+            for decoder in model.decoders:
+                for ssm_layer in decoder.ssm_layers:
+                    ssm_layer = torch.compile(ssm_layer, mode=safe_compile_mode)
+            
+            print("✓ torch.compile() applied successfully to LyroSSMUNet")
+            
+        except Exception as e:
+            print(f"Warning: torch.compile() failed: {e}")
+            print("Continuing without compilation...")
+            # Disable torch.compile for this model instance
+            use_torch_compile = False
+    
+    return model

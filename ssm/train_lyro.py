@@ -1,7 +1,7 @@
 # lyro/ssm/train_lyro.py
 """
 LYRO SSM Training Script
-Flow Matching 기반 음악 생성 모델 학습
+Flow Matching 기반 음악 생성 모델 학습 (Mixed Precision 지원)
 """
 
 import os
@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.cuda.amp import GradScaler, autocast  # Mixed Precision support
 from tqdm import tqdm
 import numpy as np
 from pathlib import Path
@@ -61,23 +62,25 @@ class LyroTrainer:
     Flow Matching을 사용하여 SSM + U-Net 모델을 학습하고,
     다단계 학습 전략을 구현합니다.
     """
-    
     def __init__(self, args):
         self.args = args
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.stage = args.stage  # 학습 단계 (B, C, D, E)
         
+        # Mixed Precision 설정
+        self.use_mixed_precision = getattr(args, 'use_mixed_precision', True)
+        self.scaler = GradScaler() if self.use_mixed_precision else None
+        
         # 모델 초기화
         self._initialize_models()
-        
-        # Flow Matching 설정
+          # Flow Matching 설정 (최적화 적용)
         self.flow_config = FlowConfig()
-        self.flow_matching = LyroFlowMatching(  # ✅ 수정: FlowMatching -> LyroFlowMatching
+        from ssm.flow_matching import create_flow_matching
+        self.flow_matching = create_flow_matching(
             model=self.ssm_model,
-            scheduler_type="cosine",
-            solver_type="heun",
-            sigma=1e-4,
-            flow_type="rectified"
+            config=self.flow_config,
+            use_torch_compile=getattr(self.args, 'use_torch_compile', True),
+            compile_mode=getattr(self.args, 'compile_mode', 'default')
         )
         
         # 옵티마이저 및 스케줄러
@@ -89,7 +92,8 @@ class LyroTrainer:
         # 체크포인트 디렉토리
         self.checkpoint_dir = Path(args.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-          # Wandb 초기화
+        
+        # Wandb 초기화
         if args.use_wandb and WANDB_AVAILABLE:
             wandb.init(
                 project="lyro-ssm",
@@ -108,22 +112,30 @@ class LyroTrainer:
             text_tokenizer_path=args.text_tokenizer_path,
             audio_vocab_size=1024,
             num_codebooks=8
-        )
+                )
         
     def _initialize_models(self):
         """모델 초기화"""
-        # SSM + U-Net 모델
-        self.ssm_model = LyroSSMUNet(
+        # SSM + U-Net 모델 (최적화 적용)
+        from ssm.model import create_lyro_ssm_model
+        self.ssm_model = create_lyro_ssm_model(
             input_channels=8,  # DCAE latent channels
-            hidden_dims=[128, 128, 256, 256, 512],
-            mamba_layers=[2, 2, 3, 3, 4],
-            max_seq_len=8192  # ✅ 수정: self.args.max_seq_len -> 8192
+            model_size="base",
+            max_seq_len=8192,
+            use_torch_compile=getattr(self.args, 'use_torch_compile', True),
+            use_mixed_precision=getattr(self.args, 'use_mixed_precision', True),
+            compile_mode=getattr(self.args, 'compile_mode', 'default')
         ).to(self.device)
         
-        # DCAE 모델 (인코딩용)
-        self.dcae_model = LyroMusicDCAE(  # ✅ 수정: MusicDCAE -> LyroMusicDCAE
+        # DCAE 모델 (인코딩용) - 최적화 적용
+        from dcae.model import create_cqt_ssm_dcae
+        self.dcae_model = create_cqt_ssm_dcae(
             sample_rate=44100,
-            latent_channels=8  # ✅ 수정: compression_factor 제거, latent_channels 사용
+            latent_channels=8,
+            model_size="base",
+            use_torch_compile=getattr(self.args, 'use_torch_compile', True),
+            use_mixed_precision=getattr(self.args, 'use_mixed_precision', True),
+            compile_mode=getattr(self.args, 'compile_mode', 'default')
         ).to(self.device)
         
         # DCAE 체크포인트 로드
@@ -311,12 +323,17 @@ class LyroTrainer:
                 # DCAE 인코딩
                 with torch.no_grad():
                     latents, _ = self.dcae_model.encode(audio)  # ✅ 수정: skip_features 처리
-                    
-                # 조건 준비
+                      # 조건 준비
                 conditions = self._prepare_conditions(batch)
                 
-                # Flow Matching 학습
-                loss = self.flow_matching.training_loss(latents, conditions)
+                # Mixed Precision Forward Pass
+                if self.use_mixed_precision:
+                    with autocast():
+                        # Flow Matching 학습
+                        loss = self.flow_matching.training_loss(latents, conditions)
+                else:
+                    # Flow Matching 학습
+                    loss = self.flow_matching.training_loss(latents, conditions)
                 
                 # Task별 손실 기록
                 for i, task_token in enumerate(task_tokens):
@@ -325,17 +342,33 @@ class LyroTrainer:
                         task_losses[task_type] += loss.item()
                         task_counts[task_type] += 1
                     
-                # Backward pass
-                self.optimizer.zero_grad()
-                loss.backward()
-                
-                # Gradient clipping
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.ssm_model.parameters(), 
-                    self.args.grad_clip
-                )
-                
-                self.optimizer.step()
+                # Mixed Precision Backward pass
+                if self.use_mixed_precision:
+                    self.scaler.scale(loss).backward()
+                    
+                    # Gradient clipping with scaler
+                    self.scaler.unscale_(self.optimizer)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        self.ssm_model.parameters(), 
+                        self.args.grad_clip
+                    )
+                    
+                    # Optimizer step with scaler
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    self.optimizer.zero_grad()
+                else:
+                    # Standard backward pass
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    
+                    # Gradient clipping
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        self.ssm_model.parameters(), 
+                        self.args.grad_clip
+                    )
+                    
+                    self.optimizer.step()
                 self.scheduler.step()
                 
                 # Adaptive weight update (Stage C, D, E)
@@ -760,8 +793,7 @@ def main():
                         help='Max audio length in samples (10s at 44.1kHz)')
     parser.add_argument('--max_text_length', type=int, default=512,
                         help='Max text token length')
-    
-    # 기타
+      # 기타
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers')
     parser.add_argument('--checkpoint_dir', type=str, default='ssm/checkpoints',
@@ -770,6 +802,15 @@ def main():
                         help='Experiment name')
     parser.add_argument('--use_wandb', action='store_true',
                         help='Use Weights & Biases logging')
+    
+    # Optimization 관련
+    parser.add_argument('--use_mixed_precision', action='store_true', default=True,
+                        help='Use Mixed Precision (FP16) training')
+    parser.add_argument('--use_torch_compile', action='store_true', default=True,
+                        help='Use torch.compile() optimization')
+    parser.add_argument('--compile_mode', type=str, default='default',
+                        choices=['default', 'reduce-overhead', 'max-autotune'],
+                        help='torch.compile() mode')
     parser.add_argument('--log_interval', type=int, default=100,
                         help='Logging interval')
     parser.add_argument('--save_interval', type=int, default=5,

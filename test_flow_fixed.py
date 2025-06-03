@@ -106,40 +106,34 @@ def create_safe_model(device):
         if None in modules:
             return None, None
         
-        LyroSSMUNet, SSMConfig, LyroFlowMatching, FlowConfig = modules        # 보수적인 모델 설정
-        config = SSMConfig()
+        # Updated imports for optimized models
+        from ssm.model import create_lyro_ssm_model
+        from ssm.flow_matching import create_flow_matching, FlowConfig
         
-        # 메모리 절약을 위한 작은 설정 (하지만 채널 수는 호환성을 위해 8로 유지)
-        input_channels = 8  # Flow Matching과 호환성을 위해 8로 고정
-        hidden_dims = [64, 128, 256]  # 작은 크기
-        ssm_layers = [2, 2, 3]  # mamba_layers를 ssm_layers로 사용
-        d_state = 64
-        max_seq_len = 2048  # 짧은 시퀀스
-        
-        print("모델 초기화 중...")
-        model = LyroSSMUNet(
-            input_channels=input_channels,
-            hidden_dims=hidden_dims,
-            ssm_layers=ssm_layers,
-            d_state=d_state,
-            max_seq_len=max_seq_len,
-            dropout=0.1,
-            use_multiscale_ssm=True
+        # 최적화된 모델 생성 (torch.compile + Mixed Precision)
+        print("최적화된 SSM 모델 생성 중...")
+        model = create_lyro_ssm_model(
+            input_channels=8,
+            model_size="small",  # 테스트용 작은 모델
+            max_seq_len=2048,
+            use_torch_compile=True,
+            use_mixed_precision=True,
+            compile_mode="default"
         ).to(device)
+        
         param_count = sum(p.numel() for p in model.parameters())
-        print(f"✅ 모델 생성 성공 - 파라미터: {param_count:,}")
-          # Flow Matching 초기화
+        print(f"✅ 최적화된 모델 생성 성공 - 파라미터: {param_count:,}")
+        
+        # 최적화된 Flow Matching 초기화
+        print("최적화된 Flow Matching 생성 중...")
         flow_config = FlowConfig()
-        flow_matching = LyroFlowMatching(
+        flow_matching = create_flow_matching(
             model=model,
-            scheduler_type=getattr(flow_config, 'scheduler_type', 'cosine'),
-            solver_type=getattr(flow_config, 'solver_type', 'heun'),
-            sigma=getattr(flow_config, 'sigma', 1e-4),
-            use_cfg=True,
-            use_self_conditioning=getattr(flow_config, 'use_self_conditioning', True),
-            flow_type=getattr(flow_config, 'flow_type', 'rectified')
+            config=flow_config,
+            use_torch_compile=True,
+            compile_mode="default"
         ).to(device)
-        print("✅ Flow Matching 초기화 성공")
+        print("✅ 최적화된 Flow Matching 초기화 성공")
         
         return model, flow_matching
         
@@ -148,7 +142,119 @@ def create_safe_model(device):
         traceback.print_exc()
         return None, None
 
-def run_benchmark_tests(flow_matching, device):
+def run_optimization_benchmark(flow_matching, device):
+    """최적화 성능 벤치마크"""
+    print("\n=== 최적화 성능 벤치마크 ===")
+    
+    if flow_matching is None:
+        print("❌ Flow Matching 모델이 없어 테스트를 건너뜁니다")
+        return
+    
+    # 기본 조건 설정
+    conditions = {
+        'genre': torch.randint(0, 10, (1,), device=device),
+        'tempo': torch.randint(80, 140, (1,), device=device),
+        'key': torch.randint(0, 12, (1,), device=device),
+        'energy': torch.rand(1, device=device),
+        'valence': torch.rand(1, device=device),
+        'task_token': torch.tensor([0], device=device)
+    }
+    
+    # torch.compile() 효과 테스트
+    if hasattr(flow_matching, '_use_torch_compile') and flow_matching._use_torch_compile:
+        print("✅ torch.compile() 최적화가 적용된 모델")
+        print(f"   컴파일 모드: {getattr(flow_matching, '_compile_mode', 'unknown')}")
+    else:
+        print("⚠️ torch.compile() 최적화 미적용")
+    
+    # Mixed Precision 효과 테스트
+    if hasattr(flow_matching.model, '_use_mixed_precision') and flow_matching.model._use_mixed_precision:
+        print("✅ Mixed Precision (FP16) 최적화 활성화")
+    else:
+        print("⚠️ Mixed Precision 최적화 미적용")
+    
+    # 성능 측정
+    test_configs = [
+        {"steps": 4, "size": 256, "name": "Ultra Fast"},
+        {"steps": 8, "size": 512, "name": "Fast"},
+        {"steps": 16, "size": 1024, "name": "High Quality"}
+    ]
+    
+    results = {}
+    
+    for config in test_configs:
+        print(f"\n--- {config['name']} 테스트 ({config['steps']} steps, {config['size']} length) ---")
+        
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats()
+                start_memory = torch.cuda.memory_allocated() / 1e9
+            
+            # Warmup run
+            with torch.no_grad():
+                _ = flow_matching.generate(
+                    shape=(1, 8, config['size']),
+                    conditions=conditions,
+                    num_steps=config['steps'],
+                    cfg_scale=1.5
+                )
+            
+            # Actual timed run
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            start_time = time.time()
+            
+            with torch.no_grad():
+                generated, _ = flow_matching.generate(
+                    shape=(1, 8, config['size']),
+                    conditions=conditions,
+                    num_steps=config['steps'],
+                    cfg_scale=1.5
+                )
+            
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            end_time = time.time()
+            
+            generation_time = end_time - start_time
+            
+            # Calculate RTF (Real-Time Factor)
+            audio_duration = config['size'] * 512 * 32 / 44100  # 32x compression, 44.1kHz
+            rtf = generation_time / audio_duration
+            
+            memory_used = 0
+            if torch.cuda.is_available():
+                memory_used = torch.cuda.max_memory_allocated() / 1e9
+            
+            results[config['name']] = {
+                'generation_time': generation_time,
+                'rtf': rtf,
+                'memory_gb': memory_used,
+                'steps': config['steps'],
+                'length': config['size'],
+                'shape': generated.shape
+            }
+            
+            print(f"✅ 생성 시간: {generation_time:.3f}초")
+            print(f"   실시간 배율 (RTF): {rtf:.2f}x")
+            print(f"   메모리 사용량: {memory_used:.2f} GB")
+            print(f"   출력 형태: {generated.shape}")
+            
+        except Exception as e:
+            print(f"❌ {config['name']} 테스트 실패: {e}")
+            results[config['name']] = {'error': str(e)}
+    
+    # 결과 요약
+    print(f"\n{'='*60}")
+    print("최적화 성능 벤치마크 결과 요약")
+    print(f"{'='*60}")
+    
+    for name, result in results.items():
+        if 'error' not in result:
+            print(f"{name:15} | {result['generation_time']:6.3f}초 | RTF: {result['rtf']:5.2f}x | {result['memory_gb']:5.2f} GB")
+        else:
+            print(f"{name:15} | 실패: {result['error']}")
+    
+    return results
     """벤치마크 테스트 실행"""
     print("\n=== 벤치마크 테스트 시작 ===")
     
@@ -376,14 +482,11 @@ def main():
         
         if model is None or flow_matching is None:
             print("❌ 모델 생성 실패로 테스트를 중단합니다")
-            return
+            return        # 4. 최적화 성능 벤치마크
+        optimization_results = run_optimization_benchmark(flow_matching, device)
         
-        # 4. 기본 벤치마크 테스트
-        success = run_benchmark_tests(flow_matching, device)
-        
-        # 5. 추가 기능 테스트 (기본 테스트가 성공한 경우)
-        if success:
-            test_additional_features(flow_matching, device)
+        # 5. 추가 기능 테스트
+        test_additional_features(flow_matching, device)
         
         print("\n" + "=" * 60)
         print("✅ 전체 테스트 완료!")

@@ -11,7 +11,7 @@ import traceback
 # 경로 설정
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from dcae.model import create_memory_optimized_lyro_dcae
+from dcae.model import create_cqt_ssm_dcae  # Updated import
 from dcae.training_utils import compute_snr, compute_si_sdr
 
 def test_dcae_models():
@@ -29,16 +29,20 @@ def test_dcae_models():
         print(f"모델 크기: {model_size}")
         print(f"{'='*60}")
         
-        try:
-            # 모델 생성
+        try:            # 모델 생성 (최적화 적용, Triton 이슈 우회)
             print(f"\n1. {model_size} 모델 생성 중...")
-            model = create_memory_optimized_lyro_dcae(
+            
+            # Windows에서 torch.compile 이슈 우회
+            import platform
+            use_compile = platform.system() != "Windows"
+            
+            model = create_cqt_ssm_dcae(
                 model_size=model_size,
                 sample_rate=44100,
-                use_vq=False,
-                memory_efficient=True,
-                chunk_size=512,  # 작은 청크 크기로 메모리 절약
-                checkpointing_segments=2  # 적은 세그먼트
+                latent_channels=8,
+                use_torch_compile=use_compile,
+                use_mixed_precision=True,
+                compile_mode="reduce-overhead" if use_compile else "default"
             ).to(device)
             
             print(f"✅ {model_size} 모델 생성 성공")
