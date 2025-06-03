@@ -173,63 +173,137 @@ class MixScaleAugmentation:
         self.eq_filters = self._create_musical_eq_filters()
     
     def _create_highpass_filters(self):
-        """Create highpass filters using Biquad"""
+        """Create highpass filters using torchaudio.functional.biquad"""
         filters = []
-        freqs = [60, 80, 100, 120]
-        
-        for freq in freqs:
-            # Simple highpass approximation using Biquad
-            # Transfer function: H(z) = (1 - z^-1) / (1 - a*z^-1) where a < 1
-            a = 0.9  # Pole location for highpass effect
-            filters.append(T.Biquad(
-                sample_rate=self.sample_rate,
-                b0=1.0, b1=-1.0, b2=0.0,
-                a0=1.0, a1=-a, a2=0.0
-            ))
+        # Create highpass filters for different cutoff frequencies
+        for cutoff in [60, 80, 100, 120]:
+            def create_highpass_fn(cutoff_freq):
+                def highpass_filter(audio):
+                    try:
+                        # Use torchaudio.functional.biquad for highpass filtering
+                        # Calculate biquad coefficients for highpass filter
+                        nyquist = self.sample_rate / 2
+                        normalized_cutoff = cutoff_freq / nyquist
+                        
+                        # Simple highpass biquad coefficients (approximate)
+                        w = 2 * torch.pi * normalized_cutoff
+                        cos_w = torch.cos(w)
+                        sin_w = torch.sin(w)
+                        alpha = sin_w / 2
+                        
+                        # Highpass coefficients
+                        b0 = (1 + cos_w) / 2
+                        b1 = -(1 + cos_w)
+                        b2 = (1 + cos_w) / 2
+                        a0 = 1 + alpha
+                        a1 = -2 * cos_w
+                        a2 = 1 - alpha
+                        
+                        # Normalize
+                        b0, b1, b2, a1, a2 = b0/a0, b1/a0, b2/a0, a1/a0, a2/a0
+                        
+                        # Apply biquad filter
+                        if audio.dim() == 1:
+                            audio = audio.unsqueeze(0)
+                        
+                        filtered = tF.biquad(audio, b0, b1, b2, a0=1.0, a1=a1, a2=a2)
+                        return filtered.squeeze(0) if filtered.shape[0] == 1 else filtered
+                        
+                    except Exception as e:
+                        print(f"Biquad highpass filter failed: {e}, using simple fallback")
+                        # Simple fallback filter
+                        if audio.dim() == 1:
+                            audio = audio.unsqueeze(0)
+                        diff = torch.zeros_like(audio)
+                        diff[:, 1:] = audio[:, 1:] - audio[:, :-1]
+                        return diff.squeeze(0) if diff.shape[0] == 1 else diff
+                        
+                return highpass_filter
+            
+            filters.append(create_highpass_fn(cutoff))
         
         return filters
     
     def _create_lowpass_filters(self):
-        """Create lowpass filters using Biquad"""
+        """Create lowpass filters using torchaudio.functional.biquad"""
         filters = []
-        freqs = [8000, 12000, 16000, 18000]
-        
-        for freq in freqs:
-            # Simple lowpass approximation using Biquad
-            # Use a simple averaging filter
-            alpha = 0.5  # Smoothing factor
-            filters.append(T.Biquad(
-                sample_rate=self.sample_rate,
-                b0=alpha, b1=alpha, b2=0.0,
-                a0=1.0, a1=-(1-alpha), a2=0.0
-            ))
-        
+        # Create lowpass filters for different cutoff frequencies
+        for cutoff in [8000, 12000, 16000, 18000]:
+            def create_lowpass_fn(cutoff_freq):
+                def lowpass_filter(audio):
+                    try:
+                        # Use torchaudio.functional.biquad for lowpass filtering
+                        # Calculate biquad coefficients for lowpass filter
+                        nyquist = self.sample_rate / 2
+                        normalized_cutoff = cutoff_freq / nyquist
+                        
+                        # Simple lowpass biquad coefficients (approximate)
+                        w = 2 * torch.pi * normalized_cutoff
+                        cos_w = torch.cos(w)
+                        sin_w = torch.sin(w)
+                        alpha = sin_w / 2
+                        
+                        # Lowpass coefficients
+                        b0 = (1 - cos_w) / 2
+                        b1 = 1 - cos_w
+                        b2 = (1 - cos_w) / 2
+                        a0 = 1 + alpha
+                        a1 = -2 * cos_w
+                        a2 = 1 - alpha
+                        
+                        # Normalize
+                        b0, b1, b2, a1, a2 = b0/a0, b1/a0, b2/a0, a1/a0, a2/a0
+                        
+                        # Apply biquad filter
+                        if audio.dim() == 1:
+                            audio = audio.unsqueeze(0)
+                        
+                        filtered = tF.biquad(audio, b0, b1, b2, a0=1.0, a1=a1, a2=a2)
+                        return filtered.squeeze(0) if filtered.shape[0] == 1 else filtered
+                        
+                    except Exception as e:
+                        print(f"Biquad lowpass filter failed: {e}, using simple fallback")
+                        # Simple fallback filter - moving average
+                        if audio.dim() == 1:
+                            audio = audio.unsqueeze(0)
+                        
+                        # Simple smoothing filter
+                        kernel_size = 3
+                        kernel = torch.ones(1, 1, kernel_size, device=audio.device) / kernel_size
+                        
+                        # Pad and apply convolution
+                        audio_padded = F.pad(audio.unsqueeze(1), (kernel_size//2, kernel_size//2), mode='replicate')
+                        filtered = F.conv1d(audio_padded, kernel, padding=0)
+                        
+                        return filtered.squeeze(1).squeeze(0) if filtered.shape[0] == 1 else filtered.squeeze(1)
+                        
+                return lowpass_filter
+            
+            filters.append(create_lowpass_fn(cutoff))
         return filters
     
     def _create_musical_eq_filters(self):
-        """Create parametric EQ filters optimized for musical content"""
+        """Create simple EQ filters using torch operations"""
         eq_filters = []
         
-        # ✅ 수정: 더 안전한 Biquad 필터 계수 사용
-        filter_configs = [
-            # freq, b0, b1, b2, a0, a1, a2 (simplified bandpass approximations)
-            (40, 0.1, 0, -0.1, 1, -1.8, 0.85),    # Sub-bass
-            (80, 0.15, 0, -0.15, 1, -1.7, 0.8),   # Bass low
-            (160, 0.2, 0, -0.2, 1, -1.6, 0.75),   # Bass high
-            (350, 0.25, 0, -0.25, 1, -1.4, 0.7),  # Low-mids
-            (800, 0.3, 0, -0.3, 1, -1.2, 0.65),   # Mids low
-            (1600, 0.35, 0, -0.35, 1, -1.0, 0.6), # Mids high
-            (3000, 0.4, 0, -0.4, 1, -0.8, 0.55),  # Upper-mids
-            (6000, 0.3, 0, -0.3, 1, -0.6, 0.5),   # Highs
-            (12000, 0.2, 0, -0.2, 1, -0.4, 0.45)  # Air
+        # Simple EQ filters implemented with basic operations
+        eq_configs = [
+            ("sub_bass", 0.9),
+            ("bass", 1.0), 
+            ("low_mid", 1.1),
+            ("mid", 1.0),
+            ("high_mid", 0.95),
+            ("high", 1.05)
         ]
         
-        for freq, b0, b1, b2, a0, a1, a2 in filter_configs:
-            eq_filters.append(T.Biquad(
-                sample_rate=self.sample_rate, 
-                b0=b0, b1=b1, b2=b2, 
-                a0=a0, a1=a1, a2=a2
-            ))
+        for name, gain in eq_configs:
+            def create_eq_fn(eq_gain):
+                def eq_filter(audio):
+                    # Simple gain-based EQ approximation
+                    return audio * eq_gain
+                return eq_filter
+            
+            eq_filters.append(create_eq_fn(gain))
         
         return eq_filters
     

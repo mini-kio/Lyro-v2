@@ -109,28 +109,26 @@ def create_safe_model(device):
         # Updated imports for optimized models
         from ssm.model import create_lyro_ssm_model
         from ssm.flow_matching import create_flow_matching, FlowConfig
-        
-        # 최적화된 모델 생성 (torch.compile + Mixed Precision)
+          # 최적화된 모델 생성 (torch.compile은 Windows에서 비활성화)
         print("최적화된 SSM 모델 생성 중...")
         model = create_lyro_ssm_model(
             input_channels=8,
             model_size="small",  # 테스트용 작은 모델
             max_seq_len=2048,
-            use_torch_compile=True,
+            use_torch_compile=False,  # Windows 호환성을 위해 비활성화
             use_mixed_precision=True,
             compile_mode="default"
         ).to(device)
         
         param_count = sum(p.numel() for p in model.parameters())
         print(f"✅ 최적화된 모델 생성 성공 - 파라미터: {param_count:,}")
-        
-        # 최적화된 Flow Matching 초기화
+          # 최적화된 Flow Matching 초기화 (torch.compile 비활성화)
         print("최적화된 Flow Matching 생성 중...")
         flow_config = FlowConfig()
         flow_matching = create_flow_matching(
             model=model,
             config=flow_config,
-            use_torch_compile=True,
+            use_torch_compile=False,  # Windows 호환성을 위해 비활성화
             compile_mode="default"
         ).to(device)
         print("✅ 최적화된 Flow Matching 초기화 성공")
@@ -166,9 +164,8 @@ def run_optimization_benchmark(flow_matching, device):
         print(f"   컴파일 모드: {getattr(flow_matching, '_compile_mode', 'unknown')}")
     else:
         print("⚠️ torch.compile() 최적화 미적용")
-    
-    # Mixed Precision 효과 테스트
-    if hasattr(flow_matching.model, '_use_mixed_precision') and flow_matching.model._use_mixed_precision:
+      # Mixed Precision 효과 테스트
+    if hasattr(flow_matching.velocity_predictor, 'model') and hasattr(flow_matching.velocity_predictor.model, '_use_mixed_precision') and flow_matching.velocity_predictor.model._use_mixed_precision:
         print("✅ Mixed Precision (FP16) 최적화 활성화")
     else:
         print("⚠️ Mixed Precision 최적화 미적용")
@@ -242,8 +239,7 @@ def run_optimization_benchmark(flow_matching, device):
         except Exception as e:
             print(f"❌ {config['name']} 테스트 실패: {e}")
             results[config['name']] = {'error': str(e)}
-    
-    # 결과 요약
+      # 결과 요약
     print(f"\n{'='*60}")
     print("최적화 성능 벤치마크 결과 요약")
     print(f"{'='*60}")
@@ -255,13 +251,16 @@ def run_optimization_benchmark(flow_matching, device):
             print(f"{name:15} | 실패: {result['error']}")
     
     return results
+
+def run_benchmark_test(flow_matching, device):
     """벤치마크 테스트 실행"""
     print("\n=== 벤치마크 테스트 시작 ===")
     
     if flow_matching is None:
         print("❌ Flow Matching 모델이 없어 테스트를 건너뜁니다")
         return
-      # 기본 조건 설정
+    
+    # 기본 조건 설정
     conditions = {
         'genre': torch.randint(0, 10, (1,), device=device),
         'tempo': torch.randint(80, 140, (1,), device=device),
@@ -485,7 +484,10 @@ def main():
             return        # 4. 최적화 성능 벤치마크
         optimization_results = run_optimization_benchmark(flow_matching, device)
         
-        # 5. 추가 기능 테스트
+        # 5. 기본 벤치마크 테스트
+        run_benchmark_test(flow_matching, device)
+        
+        # 6. 추가 기능 테스트
         test_additional_features(flow_matching, device)
         
         print("\n" + "=" * 60)
