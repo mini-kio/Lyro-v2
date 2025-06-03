@@ -76,27 +76,26 @@ def test_dcae_models():
                     print(f"   - 입력 shape: {audio.shape}")
                     print(f"   - 출력 shape: {reconstructed.shape}")
                     print(f"   - 손실: {loss_dict['total_loss'].item():.4f}")
+                      # 인코딩/디코딩 구조 테스트
+                    print("   인코딩/디코딩 구조 테스트...")
+                    latent, skip_features = model.encode(audio)
+                    print(f"   - Latent shape: {latent.shape}")
+                    print(f"   - Skip features count: {len(skip_features)}")
                     
-                    # 채널 분리 테스트
-                    if model.dual_channel_processing:
-                        print("   채널 분리 테스트...")
-                        latent, skip_features = model.encode(audio)
-                        print(f"   - Latent shape: {latent.shape}")
-                        
-                        vocal_latent, inst_latent = model.separate_channels(latent)
-                        print(f"   - Vocal latent shape: {vocal_latent.shape}")
-                        print(f"   - Instrumental latent shape: {inst_latent.shape}")
-                        
-                        # 채널 분리가 올바른지 검증
-                        expected_vocal_channels = min(4, model.latent_channels // 2)
-                        expected_inst_channels = min(4, model.latent_channels // 2)
-                        
-                        if vocal_latent.shape[1] == expected_vocal_channels and inst_latent.shape[1] == expected_inst_channels:
-                            print(f"   ✅ 채널 분리 성공 (vocal: {expected_vocal_channels}, inst: {expected_inst_channels})")
-                        else:
-                            print(f"   ❌ 채널 분리 실패")
-                    else:
-                        print("   채널 분리 비활성화됨")
+                    # Skip features 정보 출력
+                    for i, skip in enumerate(skip_features):
+                        print(f"   - Skip {i} shape: {skip.shape}")
+                    
+                    # 개별 디코딩 테스트
+                    reconstructed_from_latent = model.decode(latent, skip_features)
+                    print(f"   - Decoded shape: {reconstructed_from_latent.shape}")
+                    
+                    # 메모리 효율성 검증
+                    latent_memory = latent.numel() * 4 / 1024 / 1024  # MB
+                    audio_memory = audio.numel() * 4 / 1024 / 1024   # MB
+                    compression_ratio = audio_memory / latent_memory
+                    print(f"   - 압축 비율: {compression_ratio:.1f}x")
+                    print(f"   - 메모리 절약: {(1 - latent_memory/audio_memory)*100:.1f}%")
                     
                     # SNR/SI-SDR 테스트
                     print("   품질 메트릭 테스트...")
