@@ -90,7 +90,8 @@ class LyroTokenizer:
         """
         # 텍스트 토크나이저 (SentencePiece)
         if text_tokenizer_path and Path(text_tokenizer_path).exists():
-            self.text_tokenizer = smp.SentencePieceProcessor()
+            # Fixed typo: use the correct alias 'spm'
+            self.text_tokenizer = spm.SentencePieceProcessor()
             self.text_tokenizer.load(text_tokenizer_path)
         else:
             self.text_tokenizer = None
