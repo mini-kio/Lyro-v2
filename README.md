@@ -176,8 +176,8 @@ python ssm/train_lyro.py \
 #### CLI 인터페이스
 ```bash
 python inference/cli.py generate \
-    --dcae_model checkpoints/dcae/best_model.pt \
-    --flow_model checkpoints/flow/best_model.pt \
+    --dcae_checkpoint checkpoints/dcae/best_model.pt \
+    --ssm_checkpoint checkpoints/flow/best_model.pt \
     --duration 30 \
     --key "C major" \
     --tempo 120 \
