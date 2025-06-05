@@ -21,7 +21,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ssm.model import LyroSSMUNet, TaskController, EOSTokenHandler
 from ssm.flow_matching import LyroFlowMatching, FlowConfig
-from dcae.model import LyroMusicDCAE  # ✅ 수정: MusicDCAE -> LyroMusicDCAE
+from dcae.model import create_cqt_ssm_dcae  # ✅ 수정: CQT 모델 사용
 from dataset.tokenizer import LyroTokenizer
 
 
@@ -67,11 +67,13 @@ class LyroCLI:
             logger.info(f"Loaded SSM from {self.args.ssm_checkpoint}")
         
         self.ssm_model.eval()
-        
-        # DCAE 모델
-        self.dcae_model = LyroMusicDCAE(  # ✅ 수정: MusicDCAE -> LyroMusicDCAE
+          # DCAE 모델 (CQT 모델 사용)
+        self.dcae_model = create_cqt_ssm_dcae(
             sample_rate=44100,
-            latent_channels=8  # ✅ 수정: compression_factor 제거, latent_channels 사용
+            latent_channels=8,
+            model_size="base",  # CQT 모델 크기
+            use_torch_compile=False,  # CLI에서는 컴파일 비활성화
+            use_mixed_precision=True
         ).to(self.device)
         
         # DCAE 체크포인트 로드
@@ -250,8 +252,7 @@ class LyroCLI:
             
         start_time = float(mask_parts[0])
         end_time = float(mask_parts[1])
-        
-        # 마스크 생성 (수정된 계산)
+          # 마스크 생성 (CQT 압축율 반영: ~32x)
         # ✅ 수정: 32x 압축율 반영
         total_duration = audio.shape[1] / 44100
         latent_length = original_latent.shape[-1]
@@ -310,8 +311,7 @@ class LyroCLI:
         with torch.no_grad():
             audio_tensor = audio.unsqueeze(0).to(self.device)
             original_latent, _ = self.dcae_model.encode(audio_tensor)  # ✅ 수정: skip_features 처리
-            
-        # 연장 길이 (수정된 계산)
+              # 연장 길이 (CQT 압축율 반영: ~32x)
         extend_duration = self.args.extend_length or 30.0  # 기본 30초 연장
         # ✅ 수정: 32x 압축율 반영
         extend_samples = int(extend_duration * 44100 / (512 * 32))
@@ -391,8 +391,7 @@ class LyroCLI:
     def _generate_audio(self, conditions: Dict) -> torch.Tensor:
         """안전한 오디오 생성"""
         start_time = time.time()
-        
-        # 생성 shape (수정된 계산)
+          # 생성 shape (CQT 압축율 반영: ~32x)
         # ✅ 수정: 32x 압축율 반영
         duration_samples = min(
             int(self.args.duration * 44100 / (512 * 32)),

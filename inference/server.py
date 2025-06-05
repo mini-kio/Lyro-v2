@@ -26,7 +26,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ssm.model import LyroSSMUNet, TaskController
 from ssm.flow_matching import LyroFlowMatching, FlowConfig
-from dcae.model import LyroMusicDCAE  # ✅ 수정: MusicDCAE -> LyroMusicDCAE
+from dcae.model import create_cqt_ssm_dcae  # ✅ 수정: CQT 모델 사용
 from dataset.tokenizer import LyroTokenizer
 
 
@@ -86,11 +86,13 @@ class ModelManager:
         ssm_ckpt = torch.load(ssm_checkpoint, map_location=self.device)
         self.ssm_model.load_state_dict(ssm_ckpt['model_state_dict'])
         self.ssm_model.eval()
-        
-        # DCAE 모델
-        self.dcae_model = LyroMusicDCAE(  # ✅ 수정: MusicDCAE -> LyroMusicDCAE
+          # DCAE 모델 (CQT 모델 사용)
+        self.dcae_model = create_cqt_ssm_dcae(
             sample_rate=44100,
-            latent_channels=8  # ✅ 수정: compression_factor 제거, latent_channels 사용
+            latent_channels=8,
+            model_size="base",  # CQT 모델 크기
+            use_torch_compile=False,  # 서버에서는 컴파일 비활성화
+            use_mixed_precision=True
         ).to(self.device)
         
         # DCAE 체크포인트 로드
@@ -143,8 +145,7 @@ class ModelManager:
                     icl_reference=self._encode_reference(reference_audio) if reference_audio is not None else None,
                     device=self.device  # ✅ 추가: device 전달
                 )
-                
-                # Flow Matching 생성
+                  # Flow Matching 생성 (CQT 압축율 반영: ~32x)
                 # ✅ 수정: 32x 압축율 반영
                 duration_samples = min(
                     int(duration * 44100 / (512 * 32)),

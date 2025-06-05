@@ -50,7 +50,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ssm.model import LyroSSMUNet, TaskController, EOSTokenHandler
 from ssm.flow_matching import LyroFlowMatching, FlowConfig  # ✅ 수정: FlowMatching -> LyroFlowMatching
-from dcae.model import LyroMusicDCAE  # ✅ 수정: MusicDCAE -> LyroMusicDCAE
+from dcae.model import create_cqt_ssm_dcae  # ✅ 수정: CQT 모델 사용
 from dataset.dataset import LyroDataset, LyroCollator
 from dataset.tokenizer import LyroTokenizer
 
@@ -72,15 +72,14 @@ class LyroTrainer:
         self.scaler = GradScaler() if self.use_mixed_precision else None
         
         # 모델 초기화
-        self._initialize_models()
-          # Flow Matching 설정 (최적화 적용)
+        self._initialize_models()        # Flow Matching 설정
         self.flow_config = FlowConfig()
-        from ssm.flow_matching import create_flow_matching
-        self.flow_matching = create_flow_matching(
+        self.flow_matching = LyroFlowMatching(
             model=self.ssm_model,
-            config=self.flow_config,
-            use_torch_compile=getattr(self.args, 'use_torch_compile', True),
-            compile_mode=getattr(self.args, 'compile_mode', 'default')
+            scheduler_type="cosine",
+            solver_type="heun",
+            sigma=1e-4,
+            flow_type="rectified"
         )
         
         # 옵티마이저 및 스케줄러
@@ -115,20 +114,16 @@ class LyroTrainer:
                 )
         
     def _initialize_models(self):
-        """모델 초기화"""
-        # SSM + U-Net 모델 (최적화 적용)
-        from ssm.model import create_lyro_ssm_model
-        self.ssm_model = create_lyro_ssm_model(
+        """모델 초기화"""        # SSM + U-Net 모델 초기화
+        self.ssm_model = LyroSSMUNet(
             input_channels=8,  # DCAE latent channels
-            model_size="base",
+            hidden_dims=[128, 128, 256, 256, 512],
+            mamba_layers=[2, 2, 3, 3, 4],
             max_seq_len=8192,
             use_torch_compile=getattr(self.args, 'use_torch_compile', True),
-            use_mixed_precision=getattr(self.args, 'use_mixed_precision', True),
-            compile_mode=getattr(self.args, 'compile_mode', 'default')
+            use_mixed_precision=getattr(self.args, 'use_mixed_precision', True)
         ).to(self.device)
-        
-        # DCAE 모델 (인코딩용) - 최적화 적용
-        from dcae.model import create_cqt_ssm_dcae
+          # DCAE 모델 (인코딩용) - CQT 모델 사용
         self.dcae_model = create_cqt_ssm_dcae(
             sample_rate=44100,
             latent_channels=8,

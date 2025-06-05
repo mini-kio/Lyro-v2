@@ -16,7 +16,7 @@ from typing import Dict, List, Tuple
 import sys
 sys.path.append('..')
 
-from dcae.model import LyroMusicDCAE, create_enhanced_lyro_dcae
+from dcae.model import create_cqt_ssm_dcae, create_enhanced_lyro_dcae
 from dcae.training_utils import (
     EMAWrapper, 
     MixScaleAugmentation, 
@@ -42,7 +42,7 @@ class EnhancedDCAEInference:
         self.model = self._load_enhanced_model(model_path)
         print(f"Enhanced DCAE loaded on {self.device}")
         
-    def _load_enhanced_model(self, model_path: str) -> LyroMusicDCAE:
+    def _load_enhanced_model(self, model_path: str):
         """Load enhanced model with EMA if available"""
         checkpoint = torch.load(model_path, map_location=self.device)
         
