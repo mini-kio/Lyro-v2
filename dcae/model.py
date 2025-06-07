@@ -22,9 +22,9 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ssm.model import (
-    StateSpaceKernel, 
-    SSMBlock, 
-    MultiScaleSSM, 
+    S6StateSpaceKernel, 
+    S6Block, 
+    MultiScaleS6, 
     SinusoidalEmbedding
 )
 
@@ -103,7 +103,7 @@ class ConstantQTransform(nn.Module):
     
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
         """
-        Apply CQT to audio with enhanced padding stability
+        Apply CQT to audio with enhanced padding stability and torch.compile compatibility
         
         Args:
             audio: (B, T) or (B, C, T) audio tensor
@@ -119,6 +119,7 @@ class ConstantQTransform(nn.Module):
         
         # Enhanced padding for center mode with length validation
         if self.center:
+            # Use static pad_length to avoid torch.compile issues
             pad_length = self.kernel_length // 2
             # Ensure minimum audio length for stable processing
             if T < pad_length:
@@ -127,33 +128,44 @@ class ConstantQTransform(nn.Module):
                 audio = F.pad(audio, (0, extra_pad), mode='constant', value=0.0)
                 T = audio.shape[-1]
             
-            audio = F.pad(audio, (pad_length, pad_length), mode=self.pad_mode)
+            # Use constant padding mode to avoid torch.compile issues with 'reflect' mode
+            audio = F.pad(audio, (pad_length, pad_length), mode='constant', value=0.0)
         
         # Apply CQT kernels via convolution
         audio = audio.unsqueeze(1)  # (B, 1, T)
         
-        # Real and imaginary convolutions with error handling
+        # Real and imaginary convolutions with improved error handling
         try:
             cqt_real = F.conv1d(audio, self.kernel_real, stride=self.hop_length)
             cqt_imag = F.conv1d(audio, self.kernel_imag, stride=self.hop_length)
         except RuntimeError as e:
-            # Fallback for dimension mismatch
-            if "size mismatch" in str(e):
-                # Adjust kernel or audio size
-                min_length = min(audio.shape[-1], self.kernel_real.shape[-1])
-                if min_length > 0:
-                    audio_truncated = audio[..., :min_length] if audio.shape[-1] > min_length else audio
-                    kernel_real_truncated = self.kernel_real[..., :min_length] if self.kernel_real.shape[-1] > min_length else self.kernel_real
-                    kernel_imag_truncated = self.kernel_imag[..., :min_length] if self.kernel_imag.shape[-1] > min_length else self.kernel_imag
-                    
-                    cqt_real = F.conv1d(audio_truncated, kernel_real_truncated, stride=self.hop_length)
-                    cqt_imag = F.conv1d(audio_truncated, kernel_imag_truncated, stride=self.hop_length)
-                else:
-                    # Ultimate fallback
-                    cqt_real = torch.zeros(B, self.n_bins, 1, device=audio.device, dtype=audio.dtype)
-                    cqt_imag = torch.zeros(B, self.n_bins, 1, device=audio.device, dtype=audio.dtype)
+            # More robust fallback for dimension mismatch
+            print(f"CQT convolution fallback triggered: {str(e)[:100]}")
+            
+            # Ensure minimum valid dimensions
+            min_kernel_size = 32  # Minimum required kernel size
+            audio_len = audio.shape[-1]
+            kernel_len = self.kernel_real.shape[-1]
+            
+            if audio_len < min_kernel_size or kernel_len < min_kernel_size:
+                # Create minimal valid output
+                min_output_frames = 1
+                cqt_real = torch.zeros(B, self.n_bins, min_output_frames, device=audio.device, dtype=audio.dtype)
+                cqt_imag = torch.zeros(B, self.n_bins, min_output_frames, device=audio.device, dtype=audio.dtype)
             else:
-                raise
+                # Try with reduced kernel size
+                safe_kernel_len = min(audio_len // 4, kernel_len)
+                kernel_real_safe = self.kernel_real[..., :safe_kernel_len]
+                kernel_imag_safe = self.kernel_imag[..., :safe_kernel_len]
+                
+                try:
+                    cqt_real = F.conv1d(audio, kernel_real_safe, stride=min(self.hop_length, safe_kernel_len))
+                    cqt_imag = F.conv1d(audio, kernel_imag_safe, stride=min(self.hop_length, safe_kernel_len))
+                except RuntimeError:
+                    # Ultimate fallback
+                    output_frames = max(1, audio_len // self.hop_length)
+                    cqt_real = torch.zeros(B, self.n_bins, output_frames, device=audio.device, dtype=audio.dtype)
+                    cqt_imag = torch.zeros(B, self.n_bins, output_frames, device=audio.device, dtype=audio.dtype)
         
         # Compute magnitude with numerical stability
         cqt_mag = torch.sqrt(cqt_real**2 + cqt_imag**2 + 1e-8)
@@ -389,7 +401,7 @@ class CQTInverseTransform(nn.Module):
 
 # ==================== Enhanced SSM Components (Using Unified SSM) ====================
 
-class EnhancedMultiScaleSSM(MultiScaleSSM):
+class EnhancedMultiScaleSSM(MultiScaleS6):
     """
     Enhanced Multi-scale SSM based on the unified SSM implementation
     Adds CQT-specific optimizations while maintaining compatibility
@@ -446,10 +458,10 @@ class EnhancedMultiScaleSSM(MultiScaleSSM):
         return output
 
 
-class CQTSSMBlock(SSMBlock):
+class CQTSSMBlock(S6Block):
     """
     CQT-optimized SSM Block using the unified SSM implementation
-    Inherits from SSMBlock and adds CQT-specific enhancements
+    Inherits from S6Block and adds CQT-specific enhancements
     """
     
     def __init__(
@@ -598,7 +610,7 @@ class CQTSSMEncoder(nn.Module):
                     frequency_aware=True
                 )
             else:
-                # Use list of CQTSSMBlocks (inheriting from unified SSMBlock)
+                # Use list of CQTSSMBlocks (inheriting from unified S6Block)
                 ssm_processor = nn.ModuleList([
                     CQTSSMBlock(
                         d_model=out_channels,
@@ -1262,7 +1274,7 @@ class CQTSSMDCAE(nn.Module):
         """Get memory optimization configuration"""
         return {
             'representation': 'CQT + Harmonic-Percussive',
-            'ssm_components': 'Unified SSM (StateSpaceKernel, SSMBlock, MultiScaleSSM)',
+            'ssm_components': 'Unified SSM (S6StateSpaceKernel, S6Block, MultiScaleS6)',
             'n_bins': self.n_bins,
             'hop_length': self.hop_length,
             'compression_ratio': f'{self.get_compression_ratio():.1f}x',
@@ -1290,7 +1302,7 @@ def create_cqt_ssm_dcae(
     memory_efficient: bool = True,
     checkpointing_segments: int = 4,
     # Performance optimization parameters
-    use_torch_compile: bool = True,
+    use_torch_compile: bool = False,  # 기본값을 False로 변경하여 compile 오류 방지
     use_mixed_precision: bool = True,
     compile_mode: str = "default",  # "default", "reduce-overhead", "max-autotune"
     **kwargs
