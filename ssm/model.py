@@ -688,7 +688,8 @@ class LyroS6UNet(nn.Module):
         self,
         input_channels: int = 8,
         hidden_dims: List[int] = [128, 256, 384, 512],
-        s6_layers: List[int] = [2, 3, 4, 4],
+        s6_layers: Optional[List[int]] = None,
+        ssm_layers: Optional[List[int]] = None,
         d_state: int = 128,
         d_head: int = 64,
         max_seq_len: int = 8192,
@@ -699,7 +700,13 @@ class LyroS6UNet(nn.Module):
         use_mem_eff_path: bool = True,
     ):
         super().__init__()
-        
+
+        # Support legacy `ssm_layers` argument
+        if s6_layers is None and ssm_layers is not None:
+            s6_layers = ssm_layers
+        if s6_layers is None:
+            s6_layers = [2, 3, 4, 4][:len(hidden_dims)]
+
         assert len(hidden_dims) == len(s6_layers)
         
         self.num_stages = len(hidden_dims)
@@ -1066,6 +1073,9 @@ def create_lyro_s6_model(
     
     # Override with kwargs
     config.update(kwargs)
+    # Support legacy argument
+    if 'ssm_layers' in config and 's6_layers' not in config:
+        config['s6_layers'] = config.pop('ssm_layers')
     
     # Create S6 model
     model = LyroS6UNet(
