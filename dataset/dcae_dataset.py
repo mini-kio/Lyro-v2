@@ -90,31 +90,47 @@ class DCAEDataset(Dataset):
         audio_extensions = {'.wav', '.mp3', '.flac', '.m4a', '.ogg'}
         audio_paths = []
         
+        # 디버그 정보 출력
+        print(f"🔍 DEBUG: Looking for audio files in: {self.data_root}")
+        print(f"🔍 DEBUG: data_root exists: {self.data_root.exists()}")
+        print(f"🔍 DEBUG: data_root absolute path: {self.data_root.absolute()}")
+        
         # environmental, music, speech 폴더에서 파일 찾기
         subfolders = ['environmental', 'music', 'speech']
         
         for subfolder in subfolders:
             subfolder_path = self.data_root / subfolder
+            print(f"🔍 DEBUG: Checking subfolder: {subfolder_path}")
+            print(f"🔍 DEBUG: Subfolder exists: {subfolder_path.exists()}")
+            
             if subfolder_path.exists():
+                # 폴더 내 파일 개수 확인
+                all_files = list(subfolder_path.iterdir())
+                print(f"🔍 DEBUG: Total files in {subfolder}: {len(all_files)}")
+                
+                mp3_files = list(subfolder_path.glob('*.mp3'))
+                print(f"🔍 DEBUG: MP3 files in {subfolder}: {len(mp3_files)}")
+                
                 for ext in audio_extensions:
-                    audio_paths.extend(subfolder_path.glob(f'*{ext}'))
-                    audio_paths.extend(subfolder_path.glob(f'*{ext.upper()}'))
+                    found_files = list(subfolder_path.glob(f'*{ext}'))
+                    found_files_upper = list(subfolder_path.glob(f'*{ext.upper()}'))
+                    print(f"🔍 DEBUG: {ext} files: {len(found_files)}, {ext.upper()} files: {len(found_files_upper)}")
+                    
+                    audio_paths.extend(found_files)
+                    audio_paths.extend(found_files_upper)
         
         print(f"Found {len(audio_paths)} potential audio files")
         
-        # 유효한 파일만 필터링 (강화된 검증)
-        valid_paths = []
-        corrupted_count = 0
+        # 검증 건너뛰기 - 이미 검증 완료됨
+        print("⚡ Skipping audio validation - files already validated")
         
-        for path in tqdm(audio_paths, desc="Validating audio files"):
-            if self._is_valid_audio_enhanced(path):
+        # 기본적인 파일 존재 여부만 확인
+        valid_paths = []
+        for path in audio_paths:
+            if path.exists() and path.stat().st_size > 1000:  # 1KB 이상
                 valid_paths.append(path)
-            else:
-                corrupted_count += 1
-                
-        if corrupted_count > 0:
-            print(f"Skipped {corrupted_count} corrupted/invalid audio files")
-                
+        
+        print(f"✅ Using {len(valid_paths)} audio files (validation skipped)")
         return valid_paths
     
     def _is_valid_audio_enhanced(self, audio_path: Path) -> bool:

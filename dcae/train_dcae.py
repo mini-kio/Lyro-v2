@@ -30,12 +30,18 @@ import multiprocessing
 from collections import deque
 import threading
 from concurrent.futures import ThreadPoolExecutor
+import sys
+import shutil
+import traceback
 
 # Multi-GPU support with Accelerate
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed, DataLoaderConfiguration
 from accelerate.logging import get_logger
-import wandb
+try:
+    import wandb
+except ImportError:
+    wandb = None
 from tqdm.auto import tqdm
 
 # LYRO modules
@@ -501,8 +507,7 @@ class UltraOptimizedAudioQualityAnalyzer:
 
 class UltraOptimizedDataLoader:
     """
-    ULTRA-OPTIMIZED data loading with intelligent prefetching and caching
-    3x faster than standard DataLoader
+    ULTRA-OPTIMIZED data loading wrapper for compatibility with Accelerate
     """
     
     def __init__(self, dataset, batch_size, num_workers, collate_fn, 
@@ -527,11 +532,6 @@ class UltraOptimizedDataLoader:
             worker_init_fn=self._worker_init_fn
         )
         
-        # Background prefetching
-        self.prefetch_queue = deque(maxlen=prefetch_factor * 2)
-        self.prefetch_thread = None
-        self.stop_prefetch = threading.Event()
-        
     def _worker_init_fn(self, worker_id):
         """Initialize worker with optimizations"""
         # Set CPU affinity for workers
@@ -546,53 +546,12 @@ class UltraOptimizedDataLoader:
         except Exception:
             pass
     
-    def start_prefetch(self):
-        """Start background prefetching"""
-        if self.prefetch_thread is None or not self.prefetch_thread.is_alive():
-            self.stop_prefetch.clear()
-            self.prefetch_thread = threading.Thread(target=self._prefetch_worker)
-            self.prefetch_thread.daemon = True
-            self.prefetch_thread.start()
-    
-    def _prefetch_worker(self):
-        """Background worker for prefetching data"""
-        try:
-            iterator = iter(self.dataloader)
-            while not self.stop_prefetch.is_set():
-                try:
-                    if len(self.prefetch_queue) < self.prefetch_factor:
-                        batch = next(iterator)
-                        self.prefetch_queue.append(batch)
-                    else:
-                        time.sleep(0.001)  # Small delay when queue is full
-                except StopIteration:
-                    iterator = iter(self.dataloader)
-                except Exception as e:
-                    print(f"Prefetch error: {e}")
-                    break
-        except Exception as e:
-            print(f"Prefetch worker error: {e}")
-    
     def __iter__(self):
-        self.start_prefetch()
-        return self
-    
-    def __next__(self):
-        # Try to get from prefetch queue first
-        if self.prefetch_queue:
-            return self.prefetch_queue.popleft()
-        
-        # Fallback to regular dataloader
-        return next(iter(self.dataloader))
+        """Delegate to the underlying dataloader"""
+        return iter(self.dataloader)
     
     def __len__(self):
         return len(self.dataloader)
-    
-    def stop(self):
-        """Stop prefetching"""
-        if self.prefetch_thread:
-            self.stop_prefetch.set()
-            self.prefetch_thread.join(timeout=1.0)
 
 
 class CQTSSMDCAETrainer:
@@ -740,7 +699,6 @@ class CQTSSMDCAETrainer:
             self.config.sample_rate = self.args.sample_rate
         
         self.config.use_augmentation = False
-    
     def _initialize_models(self):
         """Ultra-optimized model initialization"""
         
@@ -748,27 +706,29 @@ class CQTSSMDCAETrainer:
         self.model = create_cqt_ssm_dcae(
             model_size=getattr(self.args, 'model_size', 'base'),
             sample_rate=self.config.sample_rate,
-            use_vq=self.config.use_vector_quantization,
-            use_weight_norm=self.config.use_weight_norm,
-            encoder_base_channels=self.config.encoder_base_channels,
-            decoder_base_channels=self.config.decoder_base_channels,
-            dropout=0.1,
-            use_multiscale_ssm=True,
-            n_bins=84 if getattr(self.args, 'model_size', 'base') == 'base' else 72,
-            hop_length=512,
-            # Ultra-optimization parameters
-            chunk_size=self.memory_chunk_size,
-            use_checkpointing=self.use_checkpointing,
+            latent_channels=getattr(self.args, 'latent_channels', 8),
             memory_efficient=self.memory_efficient,
-            checkpointing_segments=self.checkpointing_segments,
-            use_fast_cqt=True,
-            use_fused_ops=True,
-            use_cached_transforms=True,
-            # Performance optimization
-            use_torch_compile=getattr(self.args, 'use_torch_compile', False),
-            use_mixed_precision=True,
-            compile_mode=getattr(self.args, 'compile_mode', 'default')
+            checkpointing_segments=self.checkpointing_segments
         ).to(self.device)
+        
+        if self.is_main_process:
+            total_params = sum(p.numel() for p in self.model.parameters())
+            trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            self.logger.info(f"🧠 Model: {total_params:,} params ({trainable_params:,} trainable)")
+        
+        # EMA setup
+        if self.config.use_ema:
+            self.state_manager.setup_ema(self.model)
+            if self.is_main_process:
+                self.logger.info(f"📈 EMA enabled with decay {self.config.ema_decay}")
+        
+        # Model compilation for speed
+        if getattr(self.args, 'use_torch_compile', False):
+            if hasattr(torch, 'compile'):
+                compile_mode = getattr(self.args, 'compile_mode', 'default')
+                self.model = torch.compile(self.model, mode=compile_mode)
+                if self.is_main_process:
+                    self.logger.info(f"⚡ Torch compile enabled: {compile_mode}")
         
         # Setup EMA wrapper
         self.state_manager.setup_ema(self.model)
@@ -796,8 +756,7 @@ class CQTSSMDCAETrainer:
         
         if self.is_main_process:
             self.logger.info(f"🔧 Using {self.num_workers} optimized workers per GPU")
-        
-        # Ultra-optimized dataset configuration
+          # Ultra-optimized dataset configuration
         dataset_config = {
             'data_root': self.args.dataset_root,
             'sample_rate': self.config.sample_rate,
@@ -806,11 +765,7 @@ class CQTSSMDCAETrainer:
             'augmentation': False,
             'cache_audio': False,  # CQT doesn't need audio caching
             'skip_corrupted': True,
-            'target_length': self.target_length,
-            # Ultra-optimization parameters
-            'use_fast_loading': True,
-            'prefetch_samples': True,
-            'optimize_for_cqt': True
+            'target_length': self.target_length
         }
         
         self.accelerator.wait_for_everyone()
@@ -865,16 +820,12 @@ class CQTSSMDCAETrainer:
             if self.is_main_process:
                 self.logger.error(f"❌ ULTRA-OPTIMIZED data setup failed: {e}")
             raise
-    
     def _create_optimized_dataloaders(self):
         """Create ultra-optimized dataloaders"""
         collator = DCAECollator(
             max_length=self.target_length,
             min_length=int(self.config.sample_rate * min(0.5, self.audio_duration * 0.05)),
-            pad_to_multiple=512,  # Align with CQT hop_length
-            # Ultra-optimization parameters
-            use_fast_collation=True,
-            optimize_for_cqt=True
+            pad_to_multiple=512  # Align with CQT hop_length
         )
         
         # Ultra-optimized DataLoader creation
@@ -895,25 +846,26 @@ class CQTSSMDCAETrainer:
             prefetch_factor=2,
             persistent_workers=True if self.num_workers > 1 else False
         )
-        
         if self.is_main_process:
             self.logger.info(f"🔧 ULTRA-OPTIMIZED DataLoaders: Train workers={self.num_workers}, Val workers={max(1, self.num_workers // 2)}")
     
     def _setup_optimization(self):
         """Ultra-optimized optimizer and scheduler setup"""
         # Fused AdamW with ultra-optimized settings
+        # Note: fused and foreach cannot be True together
+        use_fused = torch.cuda.is_available()
         self.optimizer = optim.AdamW(
             self.model.parameters(),
             lr=self.config.learning_rate,
             betas=(0.9, 0.95),
             weight_decay=self.config.weight_decay,
             eps=1e-6,
-            fused=True if torch.cuda.is_available() else False,
-            foreach=True  # Enable vectorized operations
+            fused=use_fused,
+            foreach=not use_fused  # Use foreach only when fused is not available
         )
         
         # Ultra-optimized scheduler
-        total_steps = self.config.epochs * len(self.train_loader)
+        total_steps = self.config.epochs * len(self.train_loader.dataloader)
         
         self.scheduler = optim.lr_scheduler.OneCycleLR(
             self.optimizer,
@@ -986,11 +938,10 @@ class CQTSSMDCAETrainer:
         # Performance tracking
         batch_times = []
         memory_usage = []
-        
         if self.is_main_process:
-            pbar = tqdm(self.train_loader, desc=f'ULTRA-OPTIMIZED Epoch {epoch}')
+            pbar = tqdm(self.train_loader.dataloader, desc=f'ULTRA-OPTIMIZED Epoch {epoch}')
         else:
-            pbar = self.train_loader
+            pbar = self.train_loader.dataloader
         
         for batch_idx, batch in enumerate(pbar):
             batch_start_time = time.time()
@@ -1184,7 +1135,7 @@ class CQTSSMDCAETrainer:
             'epoch_time': epoch_time,
             'avg_batch_time': np.mean(batch_times) if batch_times else 0,
             'successful_batches': successful_batches,
-            'total_batches': len(self.train_loader),
+            'total_batches': len(self.train_loader.dataloader),
             'optimization_level': 'ULTRA-OPTIMIZED',
             'performance_improvement': time_improvement
         }
@@ -1254,7 +1205,7 @@ class CQTSSMDCAETrainer:
         val_start_time = time.time()
         
         with context_manager:
-            for batch_idx, batch in enumerate(tqdm(self.val_loader, desc='ULTRA-OPTIMIZED Validation', 
+            for batch_idx, batch in enumerate(tqdm(self.val_loader.dataloader, desc='ULTRA-OPTIMIZED Validation', 
                                                   disable=not self.is_main_process)):
                 if batch_idx >= 12:  # Reduced for ultra-optimization
                     break
@@ -1425,21 +1376,30 @@ class CQTSSMDCAETrainer:
                                     caption=f'ULTRA-OPTIMIZED CQT-SSM Reconstructed {i} (Epoch {epoch})'
                                 )
                             })
-                    
-                    # Performance metrics
+                      # Performance metrics
                     baseline_generation_time = 60  # 1 minute baseline
                     generation_improvement = max(0, baseline_generation_time - generation_time)
                     
-                    if self.args.use_wandb:
-                        self.accelerator.log({
-                            'generation/ultra_optimized_time': generation_time,
-                            'generation/performance_improvement': generation_improvement,
-                            'generation/optimization_level': 'ULTRA-OPTIMIZED'
-                        })
-                    
-                    self.logger.info(f"💾 ULTRA-OPTIMIZED samples saved to {sample_dir}")
-                    self.logger.info(f"⚡ Generation time: {generation_time:.2f}s (improvement: {generation_improvement:.2f}s)")
-                    
+                    self.logger.info(
+                        f"🎵 ULTRA-OPTIMIZED samples generated in {generation_time:.2f}s "
+                        f"(improvement: {generation_improvement:.1f}s)"
+                    )
+                
+            except Exception as e:
+                self.logger.error(f"❌ Sample generation failed: {e}")
+                import traceback
+                traceback.print_exc()
+                
+                if self.args.use_wandb:
+                    self.accelerator.log({
+                        'generation/ultra_optimized_time': generation_time,
+                        'generation/performance_improvement': generation_improvement,
+                        'generation/optimization_level': 'ULTRA-OPTIMIZED'
+                    })
+                
+                self.logger.info(f"💾 ULTRA-OPTIMIZED samples saved to {sample_dir}")
+                self.logger.info(f"⚡ Generation time: {generation_time:.2f}s (improvement: {generation_improvement:.2f}s)")
+            
             except Exception as e:
                 self.logger.warning(f"ULTRA-OPTIMIZED sample generation error: {e}")
     
@@ -1729,10 +1689,15 @@ def main():
     if args.chunk_size <= 0:
         print("❌ Chunk size must be positive!")
         return
-    
-    # Create temporary accelerator to check if this is main process
+      # Create temporary accelerator to check if this is main process
     from accelerate import Accelerator
-    temp_accelerator = Accelerator()
+    from accelerate.state import AcceleratorState
+    
+    # Reset accelerator state if already initialized
+    if AcceleratorState._shared_state:
+        AcceleratorState._shared_state.clear()
+    
+    temp_accelerator = Accelerator(mixed_precision='fp16')
     is_main = temp_accelerator.is_main_process
     
     if not torch.cuda.is_available():
