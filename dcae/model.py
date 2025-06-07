@@ -1200,11 +1200,24 @@ class CQTSSMDCAE(nn.Module):
     
     def encode(self, audio: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """Encode audio to latent using CQT and unified SSM"""
+        # Remember original length for consistent decoding
+        self._last_input_length = audio.shape[-1]
         return self.encoder(audio)
     
     def decode(self, latent: torch.Tensor, skip_features: List[torch.Tensor]) -> torch.Tensor:
         """Decode latent to audio using CQT and unified SSM"""
-        return self.decoder(latent, skip_features)
+        audio = self.decoder(latent, skip_features)
+
+        # If we encoded an input previously, ensure the length matches
+        if hasattr(self, "_last_input_length"):
+            target_len = self._last_input_length
+            if audio.shape[-1] > target_len:
+                audio = audio[..., :target_len]
+            elif audio.shape[-1] < target_len:
+                pad_len = target_len - audio.shape[-1]
+                audio = F.pad(audio, (0, pad_len), mode="reflect")
+
+        return audio
     
     def forward(
         self,
