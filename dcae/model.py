@@ -22,9 +22,9 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ssm.model import (
-    S6StateSpaceKernel, 
-    S6Block, 
-    MultiScaleS6, 
+    OptimizedS6StateSpaceKernel, 
+    OptimizedS6Block, 
+    OptimizedMultiScaleS6, 
     SinusoidalEmbedding
 )
 
@@ -401,67 +401,10 @@ class CQTInverseTransform(nn.Module):
 
 # ==================== Enhanced SSM Components (Using Unified SSM) ====================
 
-class EnhancedMultiScaleSSM(MultiScaleS6):
-    """
-    Enhanced Multi-scale SSM based on the unified SSM implementation
-    Adds CQT-specific optimizations while maintaining compatibility
-    """
-    
-    def __init__(
-        self,
-        d_model: int,
-        scales: List[int] = [1, 2, 4],
-        d_state: int = 64,
-        dropout: float = 0.1,
-        # CQT-specific enhancements
-        use_harmonic_enhancement: bool = True,
-        frequency_aware: bool = True,
-        **kwargs
-    ):
-        super().__init__(d_model, scales, d_state, dropout)
-        
-        self.use_harmonic_enhancement = use_harmonic_enhancement
-        self.frequency_aware = frequency_aware
-        
-        if use_harmonic_enhancement:
-            # Add frequency-aware processing
-            self.freq_proj = nn.Linear(d_model, d_model)
-            self.harmonic_gate = nn.Parameter(torch.ones(d_model))
-        
-        if frequency_aware:
-            # Position-dependent processing for frequency bins
-            self.freq_embed = SinusoidalEmbedding(d_model)
-    
-    def forward(self, x: torch.Tensor, freq_pos: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Enhanced forward pass with CQT-specific processing
-        
-        Args:
-            x: (B, L, D) input sequence
-            freq_pos: (B, L) frequency position indices for CQT bins
-        Returns:
-            output: (B, L, D) processed sequence
-        """
-        if self.frequency_aware and freq_pos is not None:
-            # Add frequency positional encoding
-            freq_emb = self.freq_embed(freq_pos)
-            x = x + freq_emb
-        
-        # Apply multi-scale SSM processing
-        output = super().forward(x)
-        
-        if self.use_harmonic_enhancement:
-            # Apply harmonic enhancement
-            harmonic_features = torch.tanh(self.freq_proj(output))
-            output = output * (1 + self.harmonic_gate * harmonic_features)
-        
-        return output
-
-
-class CQTSSMBlock(S6Block):
+class EnhancedCQTSSMBlock(OptimizedS6Block):
     """
     CQT-optimized SSM Block using the unified SSM implementation
-    Inherits from S6Block and adds CQT-specific enhancements
+    Inherits from OptimizedS6Block and adds CQT-specific enhancements
     """
     
     def __init__(
@@ -477,7 +420,7 @@ class CQTSSMBlock(S6Block):
         use_harmonic_bias: bool = True,
         **kwargs
     ):
-        super().__init__(d_model, d_state, d_conv, expand, dropout, layer_norm_eps)
+        super().__init__(d_model, d_state, d_conv, **kwargs)
         
         self.use_frequency_conditioning = use_frequency_conditioning
         self.use_harmonic_bias = use_harmonic_bias
@@ -509,7 +452,7 @@ class CQTSSMBlock(S6Block):
             x = x * freq_cond
         
         # Apply SSM processing (using parent's implementation)
-        x = self.ssm(x)
+        x = self.s6(x)
         
         # Apply harmonic bias
         if self.use_harmonic_bias:
@@ -601,18 +544,16 @@ class CQTSSMEncoder(nn.Module):
             
             # SSM processing using unified components
             if use_multiscale_ssm:
-                ssm_processor = EnhancedMultiScaleSSM(
+                ssm_processor = OptimizedMultiScaleS6(
                     d_model=out_channels,
                     scales=[1, 2] if out_channels >= 128 else [1],
                     d_state=d_state,
                     dropout=dropout,
-                    use_harmonic_enhancement=True,
-                    frequency_aware=True
                 )
             else:
                 # Use list of CQTSSMBlocks (inheriting from unified S6Block)
                 ssm_processor = nn.ModuleList([
-                    CQTSSMBlock(
+                    EnhancedCQTSSMBlock(
                         d_model=out_channels,
                         d_state=d_state,
                         dropout=dropout,
@@ -636,7 +577,8 @@ class CQTSSMEncoder(nn.Module):
         if use_weight_norm:
             final_conv1 = nn.utils.weight_norm(final_conv1)
             final_conv2 = nn.utils.weight_norm(final_conv2)
-          # Calculate appropriate number of groups for GroupNorm
+        
+        # Calculate appropriate number of groups for GroupNorm
         num_groups = min(8, latent_channels * 2)
         # Ensure num_channels is divisible by num_groups
         while (latent_channels * 2) % num_groups != 0 and num_groups > 1:
@@ -708,7 +650,7 @@ class CQTSSMEncoder(nn.Module):
             # Reshape for SSM processing
             x_seq = x.permute(0, 2, 3, 1).contiguous().view(B * H, W, C)  # (B*H, W, C)
             
-            if isinstance(stage['ssm_processor'], EnhancedMultiScaleSSM):
+            if isinstance(stage['ssm_processor'], OptimizedMultiScaleS6):
                 # Enhanced MultiScale SSM
                 if self.use_checkpointing and self.training:
                     x_seq = checkpoint.checkpoint(
@@ -832,17 +774,15 @@ class CQTSSMDecoder(nn.Module):
             # SSM processing using unified components
             if i < self.num_stages - 1:
                 if use_multiscale_ssm:
-                    ssm_processor = EnhancedMultiScaleSSM(
+                    ssm_processor = OptimizedMultiScaleS6(
                         d_model=out_channels,
                         scales=[1, 2] if out_channels >= 128 else [1],
                         d_state=d_state,
                         dropout=dropout,
-                        use_harmonic_enhancement=True,
-                        frequency_aware=True
                     )
                 else:
                     ssm_processor = nn.ModuleList([
-                        CQTSSMBlock(
+                        EnhancedCQTSSMBlock(
                             d_model=out_channels,
                             d_state=d_state,
                             dropout=dropout,
@@ -939,7 +879,7 @@ class CQTSSMDecoder(nn.Module):
                 if H * W > 0:
                     x_seq = x.permute(0, 2, 3, 1).contiguous().view(B * H, W, C)
                     
-                    if isinstance(stage['ssm_processor'], EnhancedMultiScaleSSM):
+                    if isinstance(stage['ssm_processor'], OptimizedMultiScaleS6):
                         # Enhanced MultiScale SSM
                         if self.use_checkpointing and self.training:
                             x_seq = checkpoint.checkpoint(
@@ -1287,7 +1227,7 @@ class CQTSSMDCAE(nn.Module):
         """Get memory optimization configuration"""
         return {
             'representation': 'CQT + Harmonic-Percussive',
-            'ssm_components': 'Unified SSM (S6StateSpaceKernel, S6Block, MultiScaleS6)',
+            'ssm_components': 'Unified SSM (OptimizedS6StateSpaceKernel, OptimizedS6Block, OptimizedMultiScaleS6)',
             'n_bins': self.n_bins,
             'hop_length': self.hop_length,
             'compression_ratio': f'{self.get_compression_ratio():.1f}x',
@@ -1378,7 +1318,8 @@ def create_cqt_ssm_dcae(
         checkpointing_segments=checkpointing_segments,
         **final_config
     )
-      # Performance optimizations
+    
+    # Performance optimizations
     if use_torch_compile and torch.__version__ >= "2.0.0":
         try:
             print(f"🚀 Applying torch.compile() with mode '{compile_mode}'...")
