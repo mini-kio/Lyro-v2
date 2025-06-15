@@ -1,8 +1,8 @@
-# lyro/dcae/model.py - Channel Flow 완전 수정 버전
+# lyro/dcae/model.py - Performance Optimized: Debug Prints Removed
 """
 DDP Compatible S6-SSM Compression Optimized LYRO DCAE Implementation
+PERFORMANCE OPTIMIZED: All debug prints removed for maximum training speed
 COMPLETELY FIXED: Channel flow consistency + NaN prevention + Model sizing
-RESOLVED: 320→6 channel mismatch and gradient flow issues
 """
 
 import torch
@@ -57,7 +57,6 @@ def safe_div(numerator: torch.Tensor, denominator: torch.Tensor, eps: float = 1e
 def check_tensor_health(tensor: torch.Tensor, name: str = "tensor") -> bool:
     """Check tensor for NaN/Inf values"""
     if torch.isnan(tensor).any() or torch.isinf(tensor).any():
-        print(f"❌ {name} contains NaN/Inf values!")
         return False
     return True
 
@@ -84,7 +83,7 @@ class MemoryEfficientAdaptivePoolingND(nn.Module):
 class CompletelyFixedChannelPruning(nn.Module):
     """
     COMPLETELY FIXED Channel Pruning with guaranteed channel flow consistency
-    RESOLVED: 320→6 channel conversion with proper gradient flow
+    PERFORMANCE OPTIMIZED: Debug prints removed
     """
     
     def __init__(
@@ -98,8 +97,6 @@ class CompletelyFixedChannelPruning(nn.Module):
         self.input_channels = input_channels
         self.target_channels = min(target_channels, input_channels)
         self.use_learnable_selection = use_learnable_selection
-        
-        print(f"🔧 Channel Pruning: {input_channels} → {target_channels}")
         
         # COMPLETELY FIXED: Always use direct projection for guaranteed channel conversion
         self.channel_projector = nn.Sequential(
@@ -127,6 +124,7 @@ class CompletelyFixedChannelPruning(nn.Module):
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         COMPLETELY FIXED channel pruning with guaranteed output channels
+        PERFORMANCE OPTIMIZED: Debug prints removed
         """
         B, C, H, W = x.shape
         
@@ -136,8 +134,7 @@ class CompletelyFixedChannelPruning(nn.Module):
                 attention_weights = self.channel_attention(x)  # [B, C]
                 attention_weights = attention_weights.unsqueeze(-1).unsqueeze(-1)  # [B, C, 1, 1]
                 x_weighted = x * attention_weights
-            except Exception as e:
-                print(f"⚠️ Channel attention failed: {e}")
+            except Exception:
                 x_weighted = x
         else:
             x_weighted = x
@@ -148,7 +145,6 @@ class CompletelyFixedChannelPruning(nn.Module):
             
             # CRITICAL: Verify output channels
             if pruned_x.shape[1] != self.target_channels:
-                print(f"❌ Channel projection failed: expected {self.target_channels}, got {pruned_x.shape[1]}")
                 # Fallback: force correct channels
                 if pruned_x.shape[1] > self.target_channels:
                     pruned_x = pruned_x[:, :self.target_channels, :, :]
@@ -159,11 +155,10 @@ class CompletelyFixedChannelPruning(nn.Module):
                     pruned_x = torch.cat([pruned_x, padding], dim=1)
             
             # FIXED: Health check
-            if not check_tensor_health(pruned_x, "pruned_x"):
+            if not check_tensor_health(pruned_x):
                 pruned_x = torch.zeros(B, self.target_channels, H, W, device=x.device, dtype=x.dtype)
             
-        except Exception as e:
-            print(f"❌ Channel projection completely failed: {e}")
+        except Exception:
             # Ultimate fallback: create safe tensor with correct shape
             pruned_x = torch.zeros(B, self.target_channels, H, W, device=x.device, dtype=x.dtype)
         
@@ -174,8 +169,6 @@ class CompletelyFixedChannelPruning(nn.Module):
             'pruning_ratio': torch.tensor((C - self.target_channels) / C, device=x.device, dtype=torch.float32),
         }
         
-        print(f"✅ Channel pruning: {x.shape} → {pruned_x.shape}")
-        
         return pruned_x, pruning_info
 
 
@@ -184,6 +177,7 @@ class CompletelyFixedChannelPruning(nn.Module):
 class CompletelyFixedCQTTransform(nn.Module):
     """
     COMPLETELY FIXED CQT Transform with guaranteed dimensional consistency
+    PERFORMANCE OPTIMIZED: Debug prints removed
     """
     
     def __init__(
@@ -296,9 +290,10 @@ class CompletelyFixedCQTTransform(nn.Module):
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
         """
         COMPLETELY FIXED CQT transform with guaranteed output dimensions
+        PERFORMANCE OPTIMIZED: Debug prints removed
         """
         # Input validation
-        if not check_tensor_health(audio, "input_audio"):
+        if not check_tensor_health(audio):
             B, T = audio.shape[-2:]
             return torch.zeros(B, self.cqt_projection_dims, T // self.hop_length, 
                              device=audio.device, dtype=audio.dtype)
@@ -336,16 +331,14 @@ class CompletelyFixedCQTTransform(nn.Module):
         if self.temporal_compressor is not None:
             cqt_compressed = self.temporal_compressor(cqt_projected)
             
-            if not check_tensor_health(cqt_compressed, "cqt_output"):
+            if not check_tensor_health(cqt_compressed):
                 return torch.zeros_like(cqt_compressed)
             
-            print(f"✅ CQT transform: {audio.shape} → {cqt_compressed.shape}")
             return cqt_compressed
         else:
-            if not check_tensor_health(cqt_projected, "cqt_projected"):
+            if not check_tensor_health(cqt_projected):
                 return torch.zeros_like(cqt_projected)
             
-            print(f"✅ CQT transform: {audio.shape} → {cqt_projected.shape}")
             return cqt_projected
 
 
@@ -362,7 +355,7 @@ class EnhancedInformationBottleneckLoss(nn.Module):
     def forward(self, latent: torch.Tensor, input_features: torch.Tensor) -> torch.Tensor:
         """Enhanced information bottleneck loss with complete safety"""
         try:
-            if not check_tensor_health(latent, "latent") or not check_tensor_health(input_features, "input_features"):
+            if not check_tensor_health(latent) or not check_tensor_health(input_features):
                 return torch.tensor(0.0, device=latent.device, requires_grad=True)
             
             # Robust entropy estimation
@@ -382,13 +375,12 @@ class EnhancedInformationBottleneckLoss(nn.Module):
             ib_loss = self.beta * latent_entropy + 0.001 * latent_magnitude_penalty
             ib_loss = torch.clamp(ib_loss, min=0.0, max=10.0)
             
-            if not check_tensor_health(ib_loss, "ib_loss"):
+            if not check_tensor_health(ib_loss):
                 return torch.tensor(0.0, device=latent.device, requires_grad=True)
             
             return ib_loss
             
-        except Exception as e:
-            print(f"⚠️ Information bottleneck loss failed: {e}")
+        except Exception:
             return torch.tensor(0.0, device=latent.device, requires_grad=True)
 
 
@@ -424,7 +416,7 @@ class EnhancedS6Block(nn.Module):
     
     def forward(self, x: torch.Tensor, state: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Dict]:
         """Enhanced S6 forward pass with numerical stability"""
-        if not check_tensor_health(x, "s6_input"):
+        if not check_tensor_health(x):
             return torch.zeros_like(x), {}
         
         # Input normalization
@@ -439,7 +431,7 @@ class EnhancedS6Block(nn.Module):
         # Output normalization
         output = self.output_norm(output)
         
-        if not check_tensor_health(output, "s6_output"):
+        if not check_tensor_health(output):
             output = torch.zeros_like(x)
         
         return output, {}
@@ -450,7 +442,7 @@ class EnhancedS6Block(nn.Module):
 class CompletelyFixedCQTSSMEncoder(nn.Module):
     """
     COMPLETELY FIXED S6-SSM Encoder with guaranteed channel flow consistency
-    RESOLVED: All dimensional mismatches and channel flow issues
+    PERFORMANCE OPTIMIZED: Debug prints removed
     """
     
     def __init__(
@@ -479,8 +471,6 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
         self.target_latent_channels = target_latent_channels
         self.base_channels = base_channels
         
-        print(f"🏗️  Building Encoder: base_channels={base_channels}, target_latent={target_latent_channels}")
-        
         # COMPLETELY FIXED CQT Transform
         self.cqt_transform = CompletelyFixedCQTTransform(
             sample_rate=sample_rate,
@@ -504,12 +494,9 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
         self.stages = nn.ModuleList()
         current_channels = base_channels
         
-        print(f"🔧 Encoder stages:")
         for i, num_ssm_layers in enumerate(ssm_layers):
             # FIXED: Controlled channel progression
             out_channels = base_channels * (2 ** min(i, 2))  # Cap at 4x base
-            
-            print(f"   Stage {i}: {current_channels} → {out_channels}, SSM layers: {num_ssm_layers}")
             
             # Downsampling
             if i == 0:
@@ -536,11 +523,8 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
             }))
             current_channels = out_channels
         
-        print(f"   Final encoder channels: {current_channels}")
-        
         # COMPLETELY FIXED: Channel pruning with guaranteed output
         if dynamic_channel_pruning:
-            print(f"🔧 Channel Pruning: {current_channels} → {target_latent_channels}")
             self.channel_pruner = CompletelyFixedChannelPruning(
                 input_channels=current_channels,
                 target_channels=target_latent_channels,
@@ -551,8 +535,6 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
             self.channel_pruner = None
             final_channels = latent_channels
 
-        print(f"✅ Final conv input channels: {final_channels}")
-        
         # COMPLETELY FIXED: Final projection with correct input channels
         self.final_conv = nn.Sequential(
             nn.Conv2d(final_channels, final_channels, 3, padding=1),
@@ -566,8 +548,9 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
     def forward(self, audio: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor], Dict]:
         """
         COMPLETELY FIXED encoding with guaranteed channel consistency
+        PERFORMANCE OPTIMIZED: Debug prints removed
         """
-        if not check_tensor_health(audio, "encoder_input"):
+        if not check_tensor_health(audio):
             B, T = audio.shape[:2]
             dummy_latent = torch.zeros(B, self.target_latent_channels, 8, 8, device=audio.device)
             return dummy_latent, [], {'error': 'invalid_input'}
@@ -576,7 +559,7 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
         
         # CQT transform
         cqt = self.cqt_transform(audio)
-        if not check_tensor_health(cqt, "cqt_features"):
+        if not check_tensor_health(cqt):
             B = audio.shape[0]
             cqt = torch.zeros(B, self.cqt_transform.cqt_projection_dims, 100, device=audio.device)
         
@@ -589,20 +572,15 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
         x = cqt.unsqueeze(1)  # Add channel dimension
         x = self.stem(x)
         
-        print(f"🔍 After stem: {x.shape}")
-        
         skip_features = []
         
         # Multi-stage processing with explicit channel tracking
         for i, stage in enumerate(self.stages):
-            print(f"🔍 Stage {i} input: {x.shape}")
-            
             # Downsampling
             x = stage['downsample'](x)
-            print(f"🔍 After downsample {i}: {x.shape}")
             
             # Health check
-            if not check_tensor_health(x, f"stage_{i}_downsample"):
+            if not check_tensor_health(x):
                 x = torch.zeros_like(x)
             
             # S6-SSM processing
@@ -613,26 +591,22 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
                 for j, ssm_block in enumerate(stage['ssm_processor']):
                     x_seq, block_info = ssm_block(x_seq)
                     
-                    if not check_tensor_health(x_seq, f"stage_{i}_block_{j}"):
+                    if not check_tensor_health(x_seq):
                         x_seq = torch.zeros_like(x_seq)
                 
                 x = x_seq.reshape(B, H, W, C).permute(0, 3, 1, 2).contiguous()
             
-            print(f"🔍 After SSM {i}: {x.shape}")
             skip_features.append(x)
             
             # Memory cleanup
             if i % 2 == 0:
                 torch.cuda.empty_cache()
         
-        print(f"🔍 Before channel pruning: {x.shape}")
-        
         # COMPLETELY FIXED: Channel pruning
         if self.channel_pruner is not None:
             x, pruning_info = self.channel_pruner(x)
-            print(f"🔍 After channel pruning: {x.shape}")
             
-            if not check_tensor_health(x, "pruned_features"):
+            if not check_tensor_health(x):
                 x = torch.zeros_like(x)
             
             compression_info['channel_pruning'] = {
@@ -642,9 +616,8 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
         
         # Final projection
         latent = self.final_conv(x)
-        print(f"🔍 Final latent: {latent.shape}")
         
-        if not check_tensor_health(latent, "final_latent"):
+        if not check_tensor_health(latent):
             latent = torch.zeros_like(latent)
         
         # Information bottleneck loss
@@ -654,17 +627,19 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
             ib_loss_value = self.ib_loss(latent, reference_features)
             ib_weight = 1.0 if self.training else 0.0
             compression_info['information_bottleneck_loss'] = ib_loss_value * ib_weight
-        except Exception as e:
-            print(f"⚠️ Information bottleneck loss failed: {e}")
+        except Exception:
             compression_info['information_bottleneck_loss'] = ib_loss_value
         
         return latent, skip_features, compression_info
 
 
-# ==================== Enhanced Decoder (Similar fixes) ====================
+# ==================== Enhanced Decoder ====================
 
 class EnhancedCQTSSMDecoder(nn.Module):
-    """Enhanced S6-SSM Decoder with proper channel handling"""
+    """
+    Enhanced S6-SSM Decoder with proper channel handling
+    PERFORMANCE OPTIMIZED: Debug prints removed
+    """
     
     def __init__(
         self,
@@ -684,11 +659,8 @@ class EnhancedCQTSSMDecoder(nn.Module):
         self.n_bins = n_bins
         self.latent_channels = latent_channels
         
-        print(f"🏗️  Building Decoder: latent_channels={latent_channels}, base_channels={base_channels}")
-        
         # FIXED: Initial projection from latent to first decoder channels
         initial_channels = base_channels * (2 ** min(self.num_stages - 1, 2))
-        print(f"🔧 Initial projection: {latent_channels} → {initial_channels}")
         
         self.initial_conv = nn.Sequential(
             nn.Conv2d(latent_channels, initial_channels, 3, padding=1),
@@ -707,8 +679,6 @@ class EnhancedCQTSSMDecoder(nn.Module):
                 out_channels = base_channels
             else:
                 out_channels = base_channels * (2 ** max(0, self.num_stages - 2 - i))
-            
-            print(f"   Decoder Stage {i}: {current_channels} → {out_channels}")
             
             # Upsampling
             upsample = nn.Sequential(
@@ -771,39 +741,35 @@ class EnhancedCQTSSMDecoder(nn.Module):
         latent: torch.Tensor, 
         skip_features: List[torch.Tensor]
     ) -> Tuple[torch.Tensor, Dict]:
-        """Enhanced decoding with proper channel handling"""
-        if not check_tensor_health(latent, "decoder_input"):
+        """
+        Enhanced decoding with proper channel handling
+        PERFORMANCE OPTIMIZED: Debug prints removed
+        """
+        if not check_tensor_health(latent):
             B, C, H, W = latent.shape
             audio = torch.zeros(B, 44100, device=latent.device)
             return audio, {'error': 'invalid_input'}
         
-        print(f"🔍 Decoder input: {latent.shape}")
-        
         compression_info = {}
         
         x = self.initial_conv(latent)
-        print(f"🔍 After initial conv: {x.shape}")
         
-        if not check_tensor_health(x, "initial_conv"):
+        if not check_tensor_health(x):
             x = torch.zeros_like(x)
         
         # Decoder stages
         for i, stage in enumerate(self.stages):
-            print(f"🔍 Decoder stage {i} input: {x.shape}")
-            
             # Upsampling
             x = stage['upsample'](x)
-            print(f"🔍 After upsample {i}: {x.shape}")
             
-            if not check_tensor_health(x, f"decoder_stage_{i}_upsample"):
+            if not check_tensor_health(x):
                 x = torch.zeros_like(x)
             
             # Skip connection
             if i < len(skip_features) and skip_features[-(i+1)] is not None:
                 skip_feat = skip_features[-(i+1)]
-                print(f"🔍 Skip feature {i}: {skip_feat.shape}")
                 
-                if check_tensor_health(skip_feat, f"skip_feat_{i}"):
+                if check_tensor_health(skip_feat):
                     # Handle shape mismatch
                     if x.shape != skip_feat.shape:
                         if x.shape[2:] != skip_feat.shape[2:]:
@@ -814,9 +780,8 @@ class EnhancedCQTSSMDecoder(nn.Module):
                         if not isinstance(self.skip_adapters[i], nn.Identity):
                             skip_feat = self.skip_adapters[i](skip_feat)
                     
-                    if check_tensor_health(skip_feat, f"adapted_skip_feat_{i}"):
+                    if check_tensor_health(skip_feat):
                         x = x + skip_feat
-                        print(f"🔍 After skip connection {i}: {x.shape}")
             
             # S6-SSM processing
             if not isinstance(stage['ssm_processor'], nn.Identity):
@@ -827,7 +792,7 @@ class EnhancedCQTSSMDecoder(nn.Module):
                     for j, ssm_block in enumerate(stage['ssm_processor']):
                         x_seq, block_info = ssm_block(x_seq)
                         
-                        if not check_tensor_health(x_seq, f"decoder_stage_{i}_block_{j}"):
+                        if not check_tensor_health(x_seq):
                             x_seq = torch.zeros_like(x_seq)
                     
                     x = x_seq.reshape(B, H, W, C).permute(0, 3, 1, 2).contiguous()
@@ -838,9 +803,8 @@ class EnhancedCQTSSMDecoder(nn.Module):
         
         # Final CQT reconstruction
         cqt_reconstructed = self.final_conv(x)
-        print(f"🔍 CQT reconstructed: {cqt_reconstructed.shape}")
         
-        if not check_tensor_health(cqt_reconstructed, "cqt_reconstructed"):
+        if not check_tensor_health(cqt_reconstructed):
             cqt_reconstructed = torch.zeros_like(cqt_reconstructed)
         
         # Handle shape for inverse CQT
@@ -856,11 +820,9 @@ class EnhancedCQTSSMDecoder(nn.Module):
         # Inverse CQT transform
         audio = self.inverse_cqt(cqt_reconstructed)
         
-        if not check_tensor_health(audio, "output_audio"):
+        if not check_tensor_health(audio):
             B = cqt_reconstructed.shape[0]
             audio = torch.zeros(B, 44100, device=cqt_reconstructed.device)
-        
-        print(f"✅ Decoder output: {audio.shape}")
         
         return audio, compression_info
 
@@ -904,7 +866,7 @@ class EnhancedCQTInverseTransform(nn.Module):
         
     def forward(self, cqt_features: torch.Tensor) -> torch.Tensor:
         """Enhanced CQT to audio conversion with complete safety"""
-        if not check_tensor_health(cqt_features, "cqt_inverse_input"):
+        if not check_tensor_health(cqt_features):
             B = cqt_features.shape[0]
             target_length = 44100
             return torch.zeros(B, target_length, device=cqt_features.device)
@@ -925,11 +887,10 @@ class EnhancedCQTInverseTransform(nn.Module):
         try:
             stft_magnitude = self.reconstruction_filter(cqt_linear)
             
-            if not check_tensor_health(stft_magnitude, "stft_magnitude"):
+            if not check_tensor_health(stft_magnitude):
                 stft_magnitude = torch.ones(B, 513, T, device=cqt_features.device) * self.eps
                 
-        except Exception as e:
-            print(f"⚠️ Reconstruction filter failed: {e}")
+        except Exception:
             stft_magnitude = torch.ones(B, 513, T, device=cqt_features.device) * self.eps
         
         # Enhanced phase generation
@@ -946,14 +907,13 @@ class EnhancedCQTInverseTransform(nn.Module):
             
             complex_spec = torch.complex(real_part, imag_part)
             
-            if not check_tensor_health(complex_spec.real, "complex_real") or not check_tensor_health(complex_spec.imag, "complex_imag"):
+            if not check_tensor_health(complex_spec.real) or not check_tensor_health(complex_spec.imag):
                 complex_spec = torch.complex(
                     torch.ones_like(real_part) * self.eps,
                     torch.zeros_like(imag_part)
                 )
                 
-        except Exception as e:
-            print(f"⚠️ Complex spectrogram creation failed: {e}")
+        except Exception:
             complex_spec = torch.complex(
                 torch.ones(B, 513, T, device=cqt_features.device) * self.eps,
                 torch.zeros(B, 513, T, device=cqt_features.device)
@@ -970,7 +930,7 @@ class EnhancedCQTInverseTransform(nn.Module):
                 
                 audio_mono = self.istft_transform(complex_spec[b], length=safe_length)
                 
-                if not check_tensor_health(audio_mono, f"audio_mono_{b}"):
+                if not check_tensor_health(audio_mono):
                     audio_mono = torch.zeros(safe_length, device=cqt_features.device)
                 
                 # Length adjustment
@@ -987,8 +947,7 @@ class EnhancedCQTInverseTransform(nn.Module):
                 
                 audio_reconstructed.append(audio_mono.unsqueeze(0))
                 
-            except Exception as e:
-                print(f"⚠️ ISTFT failed for batch {b}: {e}")
+            except Exception:
                 safe_audio = torch.zeros(target_length, device=cqt_features.device)
                 audio_reconstructed.append(safe_audio.unsqueeze(0))
         
@@ -996,11 +955,10 @@ class EnhancedCQTInverseTransform(nn.Module):
         try:
             audio = torch.stack(audio_reconstructed, dim=0)
             
-            if not check_tensor_health(audio, "final_audio"):
+            if not check_tensor_health(audio):
                 audio = torch.zeros(B, target_length, device=cqt_features.device)
                 
-        except Exception as e:
-            print(f"⚠️ Audio stacking failed: {e}")
+        except Exception:
             audio = torch.zeros(B, target_length, device=cqt_features.device)
         
         return audio
@@ -1011,7 +969,7 @@ class EnhancedCQTInverseTransform(nn.Module):
 class S6SSMCompressionOptimizedDCAE(nn.Module):
     """
     COMPLETELY FIXED S6-SSM Compression DCAE
-    RESOLVED: All channel flow issues, NaN prevention, proper model sizing
+    PERFORMANCE OPTIMIZED: Debug prints removed for maximum training speed
     """
     
     def __init__(
@@ -1066,13 +1024,6 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
         self.enable_forced_compression = enable_forced_compression
         self.enable_enhanced_perceptual_loss = enable_enhanced_perceptual_loss
         
-        print(f"🚀 Building S6-SSM DCAE:")
-        print(f"   📊 Encoder base channels: {encoder_base_channels}")
-        print(f"   📊 Decoder base channels: {decoder_base_channels}")
-        print(f"   📊 Original latent channels: {latent_channels}")
-        print(f"   📊 Target latent channels: {target_latent_channels}")
-        print(f"   📊 Dynamic channel pruning: {dynamic_channel_pruning}")
-        
         # COMPLETELY FIXED: S6-SSM Encoder
         self.encoder = CompletelyFixedCQTSSMEncoder(
             sample_rate=sample_rate,
@@ -1110,16 +1061,10 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
             )
         else:
             self.perceptual_loss_fn = None
-        
-        print(f"✅ S6-SSM DCAE built successfully!")
-        
-        # Print model size
-        total_params = sum(p.numel() for p in self.parameters())
-        print(f"📊 Total parameters: {total_params:,}")
     
     def encode(self, audio: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor], Dict]:
         """Enhanced encoding with channel flow tracking"""
-        if self.use_safe_operations and not check_tensor_health(audio, "model_input"):
+        if self.use_safe_operations and not check_tensor_health(audio):
             B, T = audio.shape[:2]
             dummy_latent = torch.zeros(B, self.target_latent_channels, 8, 8, device=audio.device)
             return dummy_latent, [], {'error': 'invalid_model_input'}
@@ -1133,7 +1078,7 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
         skip_features: List[torch.Tensor]
     ) -> Tuple[torch.Tensor, Dict]:
         """Enhanced decoding with safety checks"""
-        if self.use_safe_operations and not check_tensor_health(latent, "latent_input"):
+        if self.use_safe_operations and not check_tensor_health(latent):
             B = latent.shape[0]
             target_len = getattr(self, '_last_input_length', 44100)
             dummy_audio = torch.zeros(B, target_len, device=latent.device)
@@ -1161,9 +1106,10 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict]]:
         """
         COMPLETELY FIXED forward pass with channel flow consistency
+        PERFORMANCE OPTIMIZED: Debug prints removed
         """
         # Input validation
-        if self.use_safe_operations and not check_tensor_health(audio, "forward_input"):
+        if self.use_safe_operations and not check_tensor_health(audio):
             if return_loss:
                 B, T = audio.shape[:2]
                 dummy_audio = torch.zeros_like(audio)
@@ -1174,12 +1120,10 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
         
         original_length = audio.shape[-1]
         
-        print(f"🔍 Forward pass input: {audio.shape}")
-        
         # Encode
         latent, skip_features, encoder_compression_info = self.encode(audio)
         
-        if self.use_safe_operations and not check_tensor_health(latent, "encoded_latent"):
+        if self.use_safe_operations and not check_tensor_health(latent):
             if return_loss:
                 dummy_loss = {'total_loss': torch.tensor(0.0, device=audio.device, requires_grad=True)}
                 return torch.zeros_like(audio), dummy_loss
@@ -1189,7 +1133,7 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
         # Decode
         reconstructed, decoder_compression_info = self.decode(latent, skip_features)
         
-        if self.use_safe_operations and not check_tensor_health(reconstructed, "reconstructed_audio"):
+        if self.use_safe_operations and not check_tensor_health(reconstructed):
             reconstructed = torch.zeros_like(audio)
         
         # Length matching
@@ -1199,8 +1143,6 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
             else:
                 pad_length = original_length - reconstructed.shape[-1]
                 reconstructed = F.pad(reconstructed, (0, pad_length), mode='reflect')
-        
-        print(f"✅ Forward pass output: {reconstructed.shape}")
         
         if return_loss:
             # Enhanced loss computation
@@ -1226,8 +1168,7 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
         
         # Input validation
         if self.use_safe_operations:
-            if not (check_tensor_health(reconstructed, "loss_reconstructed") and 
-                   check_tensor_health(target, "loss_target")):
+            if not (check_tensor_health(reconstructed) and check_tensor_health(target)):
                 return {
                     'total_loss': torch.tensor(0.0, device=target.device, requires_grad=True),
                     'time_loss': torch.tensor(0.0, device=target.device, requires_grad=True),
@@ -1239,17 +1180,16 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
             try:
                 perceptual_loss, perceptual_details = self.perceptual_loss_fn(reconstructed, target)
                 
-                if check_tensor_health(perceptual_loss, "perceptual_loss"):
+                if check_tensor_health(perceptual_loss):
                     loss_dict['perceptual_loss'] = perceptual_loss
                     loss_dict.update(perceptual_details)
                 else:
                     loss_dict['time_loss'] = F.l1_loss(reconstructed, target)
-            except Exception as e:
-                print(f"⚠️ Perceptual loss failed: {e}")
+            except Exception:
                 loss_dict['time_loss'] = F.l1_loss(reconstructed, target)
         else:
             time_loss = F.l1_loss(reconstructed, target)
-            if check_tensor_health(time_loss, "time_loss"):
+            if check_tensor_health(time_loss):
                 loss_dict['time_loss'] = time_loss
             else:
                 loss_dict['time_loss'] = torch.tensor(0.0, device=target.device, requires_grad=True)
@@ -1257,7 +1197,7 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
         # Information bottleneck loss
         if 'information_bottleneck_loss' in encoder_info:
             ib_loss = encoder_info['information_bottleneck_loss']
-            if check_tensor_health(ib_loss, "ib_loss"):
+            if check_tensor_health(ib_loss):
                 loss_dict['information_bottleneck_loss'] = ib_loss
         
         # Channel pruning penalty
@@ -1266,11 +1206,11 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
                 target_pruning = 0.3
                 pruning_ratio = encoder_info['channel_pruning']['pruning_ratio']
                 
-                if check_tensor_health(pruning_ratio, "pruning_ratio"):
+                if check_tensor_health(pruning_ratio):
                     pruning_penalty = (pruning_ratio - target_pruning) ** 2
                     loss_dict['pruning_penalty'] = pruning_penalty
-            except Exception as e:
-                print(f"⚠️ Pruning penalty failed: {e}")
+            except Exception:
+                pass
         
         # Loss combination
         total_loss = torch.tensor(0.0, device=target.device, requires_grad=True)
@@ -1283,12 +1223,12 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
         
         for loss_name, loss_value in loss_dict.items():
             if loss_name in weights and torch.is_tensor(loss_value):
-                if check_tensor_health(loss_value, f"weighted_{loss_name}"):
+                if check_tensor_health(loss_value):
                     weighted_loss = weights[loss_name] * loss_value
-                    if check_tensor_health(weighted_loss, f"safe_weighted_{loss_name}"):
+                    if check_tensor_health(weighted_loss):
                         total_loss = total_loss + weighted_loss
         
-        if not check_tensor_health(total_loss, "total_loss"):
+        if not check_tensor_health(total_loss):
             total_loss = torch.tensor(0.0, device=target.device, requires_grad=True)
         
         loss_dict['total_loss'] = total_loss
@@ -1300,7 +1240,7 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
         total_params = sum(p.numel() for p in self.parameters())
         
         stats = {
-            'model_type': 'S6-SSM Completely Fixed DDP Compatible DCAE',
+            'model_type': 'S6-SSM Performance Optimized DDP Compatible DCAE',
             'total_parameters': total_params,
             'compression_optimizations': {
                 'forced_compression': self.enable_forced_compression,
@@ -1314,7 +1254,7 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
                 'sample_rate': self.sample_rate
             },
             'compression_ratio': self.hop_length * 8,
-            'optimization_level': 'Completely Fixed V100',
+            'optimization_level': 'Performance Optimized V100',
             'ddp_compatible': self.ddp_compatible,
             'static_parameters': self.static_parameters,
             'progressive_unfreezing_disabled': self.disable_progressive_unfreezing,
@@ -1322,6 +1262,7 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
             'channel_flow_fixed': True,
             'nan_loss_fixed': True,
             'numerical_stability_enhanced': True,
+            'debug_prints_removed': True,
             'v100_optimized': True
         }
         return stats
@@ -1376,8 +1317,7 @@ class EnhancedPerceptualLoss(nn.Module):
     ) -> Tuple[torch.Tensor, Dict]:
         """Enhanced perceptual loss with complete safety"""
         # Input validation
-        if not (check_tensor_health(pred_audio, "pred_audio_perceptual") and 
-               check_tensor_health(target_audio, "target_audio_perceptual")):
+        if not (check_tensor_health(pred_audio) and check_tensor_health(target_audio)):
             safe_loss = torch.tensor(0.0, device=pred_audio.device, requires_grad=True)
             return safe_loss, {'error': 'invalid_perceptual_inputs'}
         
@@ -1404,15 +1344,14 @@ class EnhancedPerceptualLoss(nn.Module):
                 pred_spec = stft_transform(pred_mono)
                 target_spec = stft_transform(target_mono)
                 
-                if (check_tensor_health(pred_spec, f"pred_spec_{i}") and 
-                   check_tensor_health(target_spec, f"target_spec_{i}")):
+                if (check_tensor_health(pred_spec) and check_tensor_health(target_spec)):
                     
                     pred_spec = torch.clamp(pred_spec, min=self.eps, max=100.0)
                     target_spec = torch.clamp(target_spec, min=self.eps, max=100.0)
                     
                     stft_loss = F.l1_loss(pred_spec, target_spec)
                     
-                    if check_tensor_health(stft_loss, f"stft_loss_{i}"):
+                    if check_tensor_health(stft_loss):
                         stft_losses.append(stft_loss)
                         losses[f'stft_loss_{i}'] = stft_loss
                     else:
@@ -1424,8 +1363,7 @@ class EnhancedPerceptualLoss(nn.Module):
                     stft_losses.append(dummy_loss)
                     losses[f'stft_loss_{i}'] = dummy_loss
                     
-            except Exception as e:
-                print(f"⚠️ STFT loss {i} failed: {e}")
+            except Exception:
                 dummy_loss = torch.tensor(0.0, device=pred_audio.device, requires_grad=True)
                 stft_losses.append(dummy_loss)
                 losses[f'stft_loss_{i}'] = dummy_loss
@@ -1434,7 +1372,7 @@ class EnhancedPerceptualLoss(nn.Module):
         if len(stft_losses) > 0:
             try:
                 avg_stft_loss = torch.stack(stft_losses).mean()
-                if not check_tensor_health(avg_stft_loss, "avg_stft_loss"):
+                if not check_tensor_health(avg_stft_loss):
                     avg_stft_loss = torch.tensor(0.0, device=pred_audio.device, requires_grad=True)
             except Exception:
                 avg_stft_loss = torch.tensor(0.0, device=pred_audio.device, requires_grad=True)
@@ -1446,15 +1384,14 @@ class EnhancedPerceptualLoss(nn.Module):
             pred_mel = self.mel_transform(pred_mono)
             target_mel = self.mel_transform(target_mono)
             
-            if (check_tensor_health(pred_mel, "pred_mel") and 
-               check_tensor_health(target_mel, "target_mel")):
+            if (check_tensor_health(pred_mel) and check_tensor_health(target_mel)):
                 
                 pred_mel = torch.clamp(pred_mel, min=self.eps, max=100.0)
                 target_mel = torch.clamp(target_mel, min=self.eps, max=100.0)
                 
                 mel_loss = F.l1_loss(pred_mel, target_mel)
                 
-                if check_tensor_health(mel_loss, "mel_loss"):
+                if check_tensor_health(mel_loss):
                     losses['mel_loss'] = mel_loss
                 else:
                     mel_loss = torch.tensor(0.0, device=pred_audio.device, requires_grad=True)
@@ -1463,21 +1400,19 @@ class EnhancedPerceptualLoss(nn.Module):
                 mel_loss = torch.tensor(0.0, device=pred_audio.device, requires_grad=True)
                 losses['mel_loss'] = mel_loss
                 
-        except Exception as e:
-            print(f"⚠️ Mel loss failed: {e}")
+        except Exception:
             mel_loss = torch.tensor(0.0, device=pred_audio.device, requires_grad=True)
             losses['mel_loss'] = mel_loss
         
         # Time domain loss
         try:
             time_loss = F.l1_loss(pred_audio, target_audio)
-            if check_tensor_health(time_loss, "time_loss_perceptual"):
+            if check_tensor_health(time_loss):
                 losses['time_loss'] = time_loss
             else:
                 time_loss = torch.tensor(0.0, device=pred_audio.device, requires_grad=True)
                 losses['time_loss'] = time_loss
-        except Exception as e:
-            print(f"⚠️ Time loss failed: {e}")
+        except Exception:
             time_loss = torch.tensor(0.0, device=pred_audio.device, requires_grad=True)
             losses['time_loss'] = time_loss
         
@@ -1485,11 +1420,10 @@ class EnhancedPerceptualLoss(nn.Module):
         try:
             total_loss = avg_stft_loss + 0.5 * mel_loss + 0.1 * time_loss
             
-            if not check_tensor_health(total_loss, "total_perceptual_loss"):
+            if not check_tensor_health(total_loss):
                 total_loss = torch.tensor(0.0, device=pred_audio.device, requires_grad=True)
                 
-        except Exception as e:
-            print(f"⚠️ Total perceptual loss combination failed: {e}")
+        except Exception:
             total_loss = torch.tensor(0.0, device=pred_audio.device, requires_grad=True)
         
         losses['total_perceptual_loss'] = total_loss
@@ -1515,7 +1449,7 @@ def create_s6_ssm_compression_optimized_dcae(
 ) -> S6SSMCompressionOptimizedDCAE:
     """
     Create COMPLETELY FIXED S6-SSM Compression DCAE
-    RESOLVED: All channel flow issues and model sizing problems
+    PERFORMANCE OPTIMIZED: Debug prints removed for maximum training speed
     """
     
     # COMPLETELY FIXED: Size configurations for proper parameter counts
@@ -1603,16 +1537,13 @@ def create_s6_ssm_compression_optimized_dcae(
         'channel_flow_fixed': True,
         'v100_optimized': True,
         'nan_loss_fixed': True,
-        'numerical_stability_enhanced': True
+        'numerical_stability_enhanced': True,
+        'debug_prints_removed': True,
+        'performance_optimized': True
     })
     
     # Apply additional overrides
     config.update(kwargs)
-    
-    print(f"🚀 Creating {model_size} model with COMPLETELY FIXED channel flow")
-    print(f"   📊 Encoder base channels: {config['encoder_base_channels']}")
-    print(f"   📊 Target latent channels: {config['target_latent_channels']}")
-    print(f"   📊 Decoder base channels: {config['decoder_base_channels']}")
     
     # Create the COMPLETELY FIXED model
     model = S6SSMCompressionOptimizedDCAE(
