@@ -16,7 +16,6 @@ import time
 from einops import rearrange, repeat
 
 
-# ==================== Fixed S6 Flow Schedulers ====================
 
 class S6FlowScheduler(ABC):
     """Abstract S6-optimized flow scheduler"""
@@ -70,7 +69,6 @@ class OptimizedS6CosineFlowScheduler(S6FlowScheduler):
         return 0.5 * (1 - torch.cos(math.pi * t)) * 0.9 + 0.1
 
 
-# ==================== Fixed ODE Solvers ====================
 
 class OptimizedS6ODESolver(ABC):
     """Abstract FIXED S6 ODE solver"""
@@ -134,7 +132,6 @@ class OptimizedS6HeunSolver(OptimizedS6ODESolver):
         return x + dt_expanded * 0.5 * (v1 + v2)
 
 
-# ==================== Fixed S6-Enhanced Velocity Networks ====================
 
 class FixedS6VelocityPredictor(nn.Module):
     """FIXED S6-enhanced velocity prediction with DCAE compatibility"""
@@ -156,7 +153,7 @@ class FixedS6VelocityPredictor(nn.Module):
         self.chunk_size = chunk_size
         self.enable_s6_optimizations = enable_s6_optimizations
         
-        # FIXED: Self-conditioning with flexible channels
+
         if use_self_conditioning:
             self.self_cond_proj = nn.Linear(256, model.hidden_dims[0] if hasattr(model, 'hidden_dims') else 128)
     
@@ -183,12 +180,12 @@ class FixedS6VelocityPredictor(nn.Module):
             use_chunked_processing: force chunked processing
         """
         
-        # FIXED: Flexible sequence length handling
+
         seq_len = x.shape[-1]
         if seq_len <= self.chunk_size * 2:
             use_chunked_processing = False
         
-        # FIXED: Improved self-conditioning
+
         if self_cond is not None and self.use_self_conditioning:
             try:
                 self_cond_emb = self.self_cond_proj(self_cond.mean(dim=-1))
@@ -198,11 +195,11 @@ class FixedS6VelocityPredictor(nn.Module):
                 # Skip self-conditioning if it fails
                 pass
         
-        # FIXED: Robust CFG handling
+
         if return_raw or not self.use_cfg or cfg_scale == 1.0:
             return self._safe_model_forward(x, t, conditions)
         
-        # FIXED: Safe batched CFG
+
         return self._safe_batched_cfg_forward(x, t, conditions, cfg_scale)
     
     def _safe_model_forward(self, x: torch.Tensor, t: torch.Tensor, conditions: Dict) -> torch.Tensor:
@@ -286,7 +283,6 @@ class FixedS6VelocityPredictor(nn.Module):
         return doubled_conditions
 
 
-# ==================== Fixed S6-Enhanced Flow Matching ====================
 
 class LyroS6FlowMatching(nn.Module):
     """
@@ -305,7 +301,7 @@ class LyroS6FlowMatching(nn.Module):
         flow_type: str = "rectified",
         chunk_size: int = 256,
         enable_s6_optimizations: bool = True,
-        # FIXED: DCAE compatibility parameters
+
         latent_channels: Optional[int] = None,  # Auto-detect from model
         flexible_channels: bool = True,         # Allow different channel counts
     ):
@@ -316,7 +312,7 @@ class LyroS6FlowMatching(nn.Module):
         self.enable_s6_optimizations = enable_s6_optimizations
         self.flexible_channels = flexible_channels
         
-        # FIXED: Auto-detect latent channels from DCAE model
+
         if latent_channels is None:
             if hasattr(model, 'latent_channels'):
                 self.expected_channels = model.latent_channels
@@ -325,7 +321,7 @@ class LyroS6FlowMatching(nn.Module):
         else:
             self.expected_channels = latent_channels
         
-        # FIXED: S6-enhanced velocity predictor with flexibility
+
         self.velocity_predictor = FixedS6VelocityPredictor(
             model=model,
             use_cfg=use_cfg,
@@ -391,7 +387,7 @@ class LyroS6FlowMatching(nn.Module):
         device = x1.device
         seq_len = x1.shape[-1]
         
-        # FIXED: Flexible channel handling
+
         if not self.flexible_channels and x1.shape[1] != self.expected_channels:
             print(f"Warning: Expected {self.expected_channels} channels, got {x1.shape[1]}")
         
@@ -461,7 +457,7 @@ class LyroS6FlowMatching(nn.Module):
         
         B, C, T = shape
         
-        # FIXED: Flexible channel validation
+
         if not self.flexible_channels and C != self.expected_channels:
             print(f"Warning: Expected {self.expected_channels} latent channels, got {C}. Proceeding anyway.")
         
@@ -490,7 +486,7 @@ class LyroS6FlowMatching(nn.Module):
             t_batch = t_curr.expand(B)
             dt_batch = dt.expand(B)
             
-            # FIXED: Safe velocity function
+
             def velocity_fn(x_in, t_in, cond, **kwargs):
                 return self.velocity_predictor(
                     x_in, t_in, cond, 
@@ -525,7 +521,6 @@ class LyroS6FlowMatching(nn.Module):
         return x, trajectory
 
 
-# ==================== Fixed S6 Flow Configuration ====================
 
 class S6FlowConfig:
     """FIXED S6 flow matching configuration with DCAE compatibility"""
@@ -541,7 +536,7 @@ class S6FlowConfig:
         self.chunk_size = 256
         self.enable_s6_optimizations = True
         
-        # FIXED: DCAE compatibility
+
         self.flexible_channels = True        # Allow different channel counts
         self.latent_channels = None          # Auto-detect from model
         
@@ -584,7 +579,6 @@ class S6FlowConfig:
             print(f"Warning: Unknown S6 preset '{preset}', using standard")
 
 
-# ==================== Fixed Factory Functions ====================
 
 def create_s6_flow_matching(
     model: nn.Module,
@@ -608,7 +602,7 @@ def create_s6_flow_matching(
     if config is None:
         config = S6FlowConfig()
     
-    # FIXED: Auto-detect latent channels from model
+
     latent_channels = None
     if hasattr(model, 'latent_channels'):
         latent_channels = model.latent_channels
@@ -624,7 +618,7 @@ def create_s6_flow_matching(
         chunk_size=config.chunk_size,
         enable_s6_optimizations=config.enable_s6_optimizations,
         use_self_conditioning=config.use_self_conditioning,
-        # FIXED: DCAE compatibility
+
         latent_channels=latent_channels,
         flexible_channels=config.flexible_channels,
     )
@@ -663,7 +657,6 @@ def create_s6_flow_matching(
     return flow_matching
 
 
-# ==================== Backward Compatibility ====================
 
 # Alias for backward compatibility
 LyroFlowMatching = LyroS6FlowMatching

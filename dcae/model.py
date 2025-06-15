@@ -1,9 +1,5 @@
 # lyro/dcae/model.py - Performance Optimized: Debug Prints Removed
-"""
-DDP Compatible S6-SSM Compression Optimized LYRO DCAE Implementation
-PERFORMANCE OPTIMIZED: All debug prints removed for maximum training speed
-COMPLETELY FIXED: Channel flow consistency + NaN prevention + Model sizing
-"""
+"""Performance-optimized DCAE implementation for stable S6-SSM models."""
 
 import torch
 import torch.nn as nn
@@ -30,17 +26,16 @@ from ssm.model import (
     ConservativeSinusoidalEmbedding
 )
 
-# CRITICAL: Disable torch._dynamo completely to prevent DDP issues
+
 import torch._dynamo
 torch._dynamo.config.disable = True
 torch._dynamo.config.suppress_errors = True
 torch._dynamo.reset()
 
-# CRITICAL: Disable compilation completely at module level
+
 os.environ['TORCH_COMPILE_DISABLE'] = '1'
 os.environ['TORCHDYNAMO_DISABLE'] = '1'
 
-# ==================== Enhanced Utility Functions ====================
 
 def safe_log(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     """Safe logarithm to prevent NaN"""
@@ -60,7 +55,6 @@ def check_tensor_health(tensor: torch.Tensor, name: str = "tensor") -> bool:
         return False
     return True
 
-# ==================== Enhanced Memory Efficient Utility Classes ====================
 
 class MemoryEfficientAdaptivePoolingND(nn.Module):
     """Memory efficient adaptive pooling for DDP compatibility"""
@@ -78,7 +72,6 @@ class MemoryEfficientAdaptivePoolingND(nn.Module):
             return x.mean(dim=tuple(range(2, x.dim())), keepdim=True)
 
 
-# ==================== COMPLETELY FIXED Channel Pruning ====================
 
 class CompletelyFixedChannelPruning(nn.Module):
     """
@@ -98,7 +91,7 @@ class CompletelyFixedChannelPruning(nn.Module):
         self.target_channels = min(target_channels, input_channels)
         self.use_learnable_selection = use_learnable_selection
         
-        # COMPLETELY FIXED: Always use direct projection for guaranteed channel conversion
+
         self.channel_projector = nn.Sequential(
             nn.Conv2d(input_channels, target_channels * 2, kernel_size=1, bias=False),
             nn.BatchNorm2d(target_channels * 2),
@@ -108,7 +101,7 @@ class CompletelyFixedChannelPruning(nn.Module):
             nn.Tanh()  # Bounded output for stability
         )
         
-        # FIXED: Optional learnable attention for channel importance
+
         if self.use_learnable_selection:
             self.channel_attention = nn.Sequential(
                 nn.AdaptiveAvgPool2d(1),
@@ -128,7 +121,7 @@ class CompletelyFixedChannelPruning(nn.Module):
         """
         B, C, H, W = x.shape
         
-        # FIXED: Optional attention weighting
+
         if self.channel_attention is not None:
             try:
                 attention_weights = self.channel_attention(x)  # [B, C]
@@ -139,11 +132,11 @@ class CompletelyFixedChannelPruning(nn.Module):
         else:
             x_weighted = x
         
-        # COMPLETELY FIXED: Direct projection that ALWAYS produces target_channels
+
         try:
             pruned_x = self.channel_projector(x_weighted)
             
-            # CRITICAL: Verify output channels
+
             if pruned_x.shape[1] != self.target_channels:
                 # Fallback: force correct channels
                 if pruned_x.shape[1] > self.target_channels:
@@ -154,7 +147,7 @@ class CompletelyFixedChannelPruning(nn.Module):
                     padding = torch.zeros(B, pad_channels, H, W, device=x.device, dtype=x.dtype)
                     pruned_x = torch.cat([pruned_x, padding], dim=1)
             
-            # FIXED: Health check
+
             if not check_tensor_health(pruned_x):
                 pruned_x = torch.zeros(B, self.target_channels, H, W, device=x.device, dtype=x.dtype)
             
@@ -162,7 +155,7 @@ class CompletelyFixedChannelPruning(nn.Module):
             # Ultimate fallback: create safe tensor with correct shape
             pruned_x = torch.zeros(B, self.target_channels, H, W, device=x.device, dtype=x.dtype)
         
-        # FIXED: Simple pruning info
+
         pruning_info = {
             'input_channels': torch.tensor(C, device=x.device, dtype=torch.float32),
             'output_channels': torch.tensor(self.target_channels, device=x.device, dtype=torch.float32),
@@ -172,7 +165,6 @@ class CompletelyFixedChannelPruning(nn.Module):
         return pruned_x, pruning_info
 
 
-# ==================== COMPLETELY FIXED CQT Transform ====================
 
 class CompletelyFixedCQTTransform(nn.Module):
     """
@@ -190,7 +182,7 @@ class CompletelyFixedCQTTransform(nn.Module):
         window: str = 'hann',
         center: bool = True,
         pad_mode: str = 'reflect',
-        # FIXED: Conservative parameters for stability
+
         enable_forced_compression: bool = True,
         cqt_projection_dims: int = 80,
         temporal_compression_stride: int = 2,
@@ -213,7 +205,7 @@ class CompletelyFixedCQTTransform(nn.Module):
         self.enable_anti_aliasing = enable_anti_aliasing
         self.learnable_frequency_projection = learnable_frequency_projection
         
-        # FIXED: Conservative extended bins
+
         if self.learnable_frequency_projection:
             self.extended_n_bins = min(120, n_bins + 20)
         else:
@@ -222,7 +214,7 @@ class CompletelyFixedCQTTransform(nn.Module):
         # Pre-compute CQT kernels
         self._precompute_kernels_efficiently()
         
-        # FIXED: Always use frequency projection for consistency
+
         self.frequency_projection = nn.Sequential(
             nn.Linear(self.extended_n_bins, 128),
             nn.ReLU(inplace=True),
@@ -232,7 +224,7 @@ class CompletelyFixedCQTTransform(nn.Module):
             nn.Tanh()
         )
         
-        # FIXED: Optional anti-aliasing
+
         if self.enable_anti_aliasing and self.temporal_compression_stride > 1:
             self.anti_alias_filter = nn.Conv1d(
                 self.cqt_projection_dims,
@@ -248,7 +240,7 @@ class CompletelyFixedCQTTransform(nn.Module):
         else:
             self.anti_alias_filter = None
         
-        # FIXED: Temporal compression
+
         if self.temporal_compression_stride > 1:
             self.temporal_compressor = nn.Conv1d(
                 self.cqt_projection_dims,
@@ -319,7 +311,7 @@ class CompletelyFixedCQTTransform(nn.Module):
         cqt_log = safe_log(cqt_mag + 1e-6)
         cqt_log = torch.clamp(cqt_log, min=-10.0, max=8.0)
         
-        # FIXED: Always apply frequency projection
+
         cqt_projected = cqt_log.transpose(1, 2)
         cqt_projected = self.frequency_projection(cqt_projected)
         cqt_projected = cqt_projected.transpose(1, 2)
@@ -342,7 +334,6 @@ class CompletelyFixedCQTTransform(nn.Module):
             return cqt_projected
 
 
-# ==================== Enhanced Information Bottleneck Loss ====================
 
 class EnhancedInformationBottleneckLoss(nn.Module):
     """Enhanced Information Bottleneck Loss with complete numerical stability"""
@@ -384,7 +375,6 @@ class EnhancedInformationBottleneckLoss(nn.Module):
             return torch.tensor(0.0, device=latent.device, requires_grad=True)
 
 
-# ==================== Enhanced S6 Blocks ====================
 
 class EnhancedS6Block(nn.Module):
     """Enhanced S6 Block with improved numerical stability"""
@@ -437,7 +427,6 @@ class EnhancedS6Block(nn.Module):
         return output, {}
 
 
-# ==================== COMPLETELY FIXED Encoder ====================
 
 class CompletelyFixedCQTSSMEncoder(nn.Module):
     """
@@ -471,7 +460,7 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
         self.target_latent_channels = target_latent_channels
         self.base_channels = base_channels
         
-        # COMPLETELY FIXED CQT Transform
+
         self.cqt_transform = CompletelyFixedCQTTransform(
             sample_rate=sample_rate,
             hop_length=hop_length,
@@ -482,7 +471,7 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
             learnable_frequency_projection=True
         )
         
-        # FIXED: Stem processing
+
         self.stem = nn.Sequential(
             nn.Conv2d(1, base_channels, 5, padding=2),
             nn.BatchNorm2d(base_channels),
@@ -490,12 +479,12 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
             nn.Dropout2d(dropout * 0.5)
         )
         
-        # COMPLETELY FIXED: Multi-stage encoder with explicit channel tracking
+
         self.stages = nn.ModuleList()
         current_channels = base_channels
         
         for i, num_ssm_layers in enumerate(ssm_layers):
-            # FIXED: Controlled channel progression
+
             out_channels = base_channels * (2 ** min(i, 2))  # Cap at 4x base
             
             # Downsampling
@@ -523,7 +512,7 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
             }))
             current_channels = out_channels
         
-        # COMPLETELY FIXED: Channel pruning with guaranteed output
+
         if dynamic_channel_pruning:
             self.channel_pruner = CompletelyFixedChannelPruning(
                 input_channels=current_channels,
@@ -535,7 +524,7 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
             self.channel_pruner = None
             final_channels = latent_channels
 
-        # COMPLETELY FIXED: Final projection with correct input channels
+
         self.final_conv = nn.Sequential(
             nn.Conv2d(final_channels, final_channels, 3, padding=1),
             nn.BatchNorm2d(final_channels),
@@ -602,7 +591,7 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
             if i % 2 == 0:
                 torch.cuda.empty_cache()
         
-        # COMPLETELY FIXED: Channel pruning
+
         if self.channel_pruner is not None:
             x, pruning_info = self.channel_pruner(x)
             
@@ -633,7 +622,6 @@ class CompletelyFixedCQTSSMEncoder(nn.Module):
         return latent, skip_features, compression_info
 
 
-# ==================== Enhanced Decoder ====================
 
 class EnhancedCQTSSMDecoder(nn.Module):
     """
@@ -659,7 +647,7 @@ class EnhancedCQTSSMDecoder(nn.Module):
         self.n_bins = n_bins
         self.latent_channels = latent_channels
         
-        # FIXED: Initial projection from latent to first decoder channels
+
         initial_channels = base_channels * (2 ** min(self.num_stages - 1, 2))
         
         self.initial_conv = nn.Sequential(
@@ -827,7 +815,6 @@ class EnhancedCQTSSMDecoder(nn.Module):
         return audio, compression_info
 
 
-# ==================== Enhanced CQT Inverse Transform ====================
 
 class EnhancedCQTInverseTransform(nn.Module):
     """Enhanced Inverse CQT Transform with complete numerical stability"""
@@ -964,7 +951,6 @@ class EnhancedCQTInverseTransform(nn.Module):
         return audio
 
 
-# ==================== COMPLETELY FIXED Main Model ====================
 
 class S6SSMCompressionOptimizedDCAE(nn.Module):
     """
@@ -978,7 +964,7 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
         n_bins: int = 84,
         hop_length: int = 512,
         latent_channels: int = 12,
-        # COMPLETELY FIXED configuration
+
         enable_forced_compression: bool = True,
         cqt_projection_dims: int = 80,
         temporal_compression_stride: int = 2,
@@ -1008,7 +994,7 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
     ):
         super().__init__()
         
-        # CRITICAL: Store all parameters for debugging
+
         self.sample_rate = sample_rate
         self.latent_channels = latent_channels  # Original latent channels
         self.target_latent_channels = target_latent_channels  # After pruning
@@ -1024,7 +1010,7 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
         self.enable_forced_compression = enable_forced_compression
         self.enable_enhanced_perceptual_loss = enable_enhanced_perceptual_loss
         
-        # COMPLETELY FIXED: S6-SSM Encoder
+
         self.encoder = CompletelyFixedCQTSSMEncoder(
             sample_rate=sample_rate,
             n_bins=n_bins,
@@ -1041,9 +1027,9 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
             **kwargs
         )
         
-        # COMPLETELY FIXED: S6-SSM Decoder (use target_latent_channels)
+
         self.decoder = EnhancedCQTSSMDecoder(
-            latent_channels=target_latent_channels,  # CRITICAL: Use pruned channels
+            latent_channels=target_latent_channels,
             base_channels=decoder_base_channels,
             n_bins=n_bins,
             output_channels=1,
@@ -1268,7 +1254,6 @@ class S6SSMCompressionOptimizedDCAE(nn.Module):
         return stats
 
 
-# ==================== Enhanced Perceptual Loss ====================
 
 class EnhancedPerceptualLoss(nn.Module):
     """Enhanced Perceptual Loss with complete numerical stability"""
@@ -1431,18 +1416,17 @@ class EnhancedPerceptualLoss(nn.Module):
         return total_loss, losses
 
 
-# ==================== COMPLETELY FIXED Factory Function ====================
 
 def create_s6_ssm_compression_optimized_dcae(
     model_size: str = "base",
     sample_rate: int = 44100,
     compression_level: str = "medium",
     enable_all_optimizations: bool = False,
-    # CRITICAL: DDP compatibility parameters
+
     ddp_compatible: bool = True,
     static_parameters: bool = True,
     disable_progressive_unfreezing: bool = True,
-    # FIXED: Additional parameters for stability
+
     enable_enhanced_numerical_stability: bool = True,
     use_safe_operations: bool = True,
     **kwargs
@@ -1452,7 +1436,7 @@ def create_s6_ssm_compression_optimized_dcae(
     PERFORMANCE OPTIMIZED: Debug prints removed for maximum training speed
     """
     
-    # COMPLETELY FIXED: Size configurations for proper parameter counts
+
     size_configs = {
         "small": {
             "encoder_base_channels": 48,
@@ -1464,17 +1448,17 @@ def create_s6_ssm_compression_optimized_dcae(
             "cqt_projection_dims": 48
         },
         "base": {
-            # FIXED: Base model for ~60M parameters
+
             "encoder_base_channels": 80,
             "decoder_base_channels": 80,
             "latent_channels": 12,
-            "target_latent_channels": 6,  # CRITICAL: This matches final_conv input
+            "target_latent_channels": 6,
             "n_bins": 84,
             "d_state": 40,
             "cqt_projection_dims": 80
         },
         "large": {
-            # FIXED: Large model for ~100M parameters
+
             "encoder_base_channels": 112,
             "decoder_base_channels": 112,
             "latent_channels": 16,
@@ -1527,7 +1511,7 @@ def create_s6_ssm_compression_optimized_dcae(
         }
         config.update(optimization_config)
     
-    # CRITICAL: Apply enhanced stability and DDP compatibility
+
     config.update({
         'ddp_compatible': ddp_compatible,
         'static_parameters': static_parameters,

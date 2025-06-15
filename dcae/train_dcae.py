@@ -33,13 +33,13 @@ import traceback
 import signal
 import functools
 
-# CRITICAL: Disable ALL torch compilation and dynamo tracing
+
 import torch._dynamo
 torch._dynamo.config.disable = True
 torch._dynamo.config.suppress_errors = True
 torch._dynamo.reset()
 
-# CRITICAL: Force disable all compilation at environment level
+
 os.environ['TORCH_COMPILE_DISABLE'] = '1'
 os.environ['TORCHDYNAMO_DISABLE'] = '1'
 os.environ['PYTORCH_DISABLE_COMPILE'] = '1'
@@ -231,7 +231,7 @@ class DDPCompatibleS6SSMTrainer:
         self.compression_level = getattr(args, 'compression_level', 'high')
         self.enable_all_optimizations = getattr(args, 'enable_all_optimizations', True)
         
-        # CRITICAL: DDP initialization with timeout protection
+
         self._initialize_ddp_safely()
         
         # Initialize components in stages to prevent deadlock
@@ -270,7 +270,7 @@ class DDPCompatibleS6SSMTrainer:
             dispatch_batches=False
         )
         
-        # CRITICAL: Force DDP-only settings
+
         os.environ['ACCELERATE_USE_FSDP'] = 'false'
         os.environ['ACCELERATE_USE_DEEPSPEED'] = 'false'
         os.environ['FSDP_AUTO_WRAP_POLICY'] = 'DISABLE'
@@ -309,7 +309,7 @@ class DDPCompatibleS6SSMTrainer:
         self.device = self.accelerator.device
         self.is_main_process = self.accelerator.is_main_process
         
-        # CRITICAL: V100 optimizations
+
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True

@@ -1,21 +1,17 @@
 # lyro/dcae/config.py - Enhanced Model Size & NaN Fixed Configuration
-"""
-Enhanced DCAE Configuration for CQT-SSM Based Models with S6-SSM Compression Optimization
-FIXED: Model size adjustment for base(60M), large(100M) + NaN loss prevention
-ENHANCED: Complete numerical stability and gradient flow optimization
-"""
+"""Configuration for CQT-SSM DCAE models with improved stability."""
 
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict
 import os
 import math
 
-# FIXED: Disable torch._dynamo completely at config level
+
 import torch._dynamo
 torch._dynamo.config.disable = True
 torch._dynamo.config.suppress_errors = True
 
-# FIXED: Disable compilation completely
+
 os.environ['TORCH_COMPILE_DISABLE'] = '1'
 os.environ['TORCHDYNAMO_DISABLE'] = '1'
 
@@ -27,127 +23,127 @@ class DCAEConfig:
     # 오디오 설정
     sample_rate: int = 44100
     
-    # FIXED: Enhanced CQT 설정 with larger model support
+
     cqt_hop_length: int = 512
     cqt_n_bins: int = 84
     cqt_bins_per_octave: int = 12
     cqt_fmin: float = 32.7  # C1 frequency
     cqt_window: str = 'hann'
     
-    # FIXED: Enhanced compression mechanisms for larger models
+
     enable_forced_compression: bool = True
     cqt_projection_dims: int = 80  # Increased from 64 for larger models
     learnable_frequency_projection: bool = True
     
-    # FIXED: Enhanced temporal compression
+
     temporal_compression_stride: int = 2
     enable_anti_aliasing: bool = True
     progressive_compression_stages: List[int] = field(default_factory=lambda: [2, 2, 2])
     
-    # FIXED: Enhanced latent bottleneck for larger models
+
     dynamic_channel_pruning: bool = True
     adaptive_latent_channels: Tuple[int, int] = (6, 8)  # Increased from (4, 6)
     information_bottleneck_weight: float = 0.05  # Reduced for stability
     
-    # FIXED: Enhanced multi-resolution CQT
+
     cqt_hop_lengths: List[int] = field(default_factory=lambda: [256, 512, 1024])
     cqt_n_bins_list: List[int] = field(default_factory=lambda: [72, 84, 96])
     
-    # FIXED: Enhanced model configuration for proper sizing
+
     compression_factor: int = 16
     latent_channels: int = 12  # Increased from 8 for larger models
     
-    # FIXED: Enhanced encoder configuration for larger models
+
     encoder_base_channels: int = 80  # Increased from 64
     encoder_channels: List[int] = field(default_factory=lambda: [40, 80, 160, 320])  # Adjusted progression
     encoder_strides: List[int] = field(default_factory=lambda: [2, 2, 2, 2])
     encoder_kernel_sizes: List[int] = field(default_factory=lambda: [7, 5, 5, 3])
     
-    # FIXED: Enhanced decoder configuration for larger models
+
     decoder_base_channels: int = 80  # Increased from 64
     decoder_channels: List[int] = field(default_factory=lambda: [320, 160, 80, 40])  # Adjusted progression
     decoder_strides: List[int] = field(default_factory=lambda: [2, 2, 2, 2])
     decoder_kernel_sizes: List[int] = field(default_factory=lambda: [3, 5, 5, 7])
     
-    # FIXED: Enhanced S6-SSM configuration for larger models
+
     ssm_d_state: int = 40  # Increased from 32
     ssm_d_conv: int = 4
     ssm_expand: int = 2
     ssm_layers: List[int] = field(default_factory=lambda: [3, 3, 3, 3])  # Increased layers
     
-    # FIXED: Enhanced compression-aware S6 settings
+
     enable_compression_aware_s6: bool = True
     selective_state_saving: bool = True
     adaptive_forgetting_rate: float = 0.05  # Reduced for stability
     compression_regularization_weight: float = 0.02  # Reduced for stability
     
-    # FIXED: Enhanced multi-scale S6-SSM
+
     enable_multiscale_ssm: bool = True
     ssm_scales: List[str] = field(default_factory=lambda: ['global', 'middle', 'fine'])
     cross_scale_attention: bool = False  # Disabled for numerical stability
     
-    # FIXED: Enhanced semantic-guided S6 (disabled for stability)
+
     enable_semantic_guidance: bool = False  # Disabled for stability
     self_supervised_embedding: bool = False  # Disabled for stability
     semantic_state_spaces: List[str] = field(default_factory=lambda: ['harmonic', 'rhythmic'])  # Reduced
     
-    # FIXED: Enhanced skip connection redesign
+
     enable_selective_skip: bool = True
     mutual_information_threshold: float = 0.25  # Reduced for stability
     skip_pruning_ratio: float = 0.3  # Reduced for stability
     
-    # FIXED: Enhanced compression-friendly skip design
+
     learnable_compression_skip: bool = True
     semantic_skip: bool = False  # Disabled for stability
     adaptive_skip_activation: bool = False  # Disabled for stability
     s6_enhanced_skip: bool = True
     
-    # FIXED: Enhanced memory optimization
+
     chunk_size: int = 256
     use_checkpointing: bool = False  # Disabled to prevent NaN
     memory_efficient: bool = True
     checkpointing_segments: int = 0  # Disabled
     
-    # FIXED: Enhanced VQ settings (mostly disabled for stability)
+
     use_vector_quantization: bool = False
     vq_num_embeddings: int = 512
     vq_embedding_dim: int = 6
     vq_beta: float = 0.25
     
-    # FIXED: Enhanced quality enhancement with stability focus
+
     enable_enhanced_perceptual_loss: bool = True
     multi_resolution_stft_loss: bool = False  # Disabled for stability
     mel_scale_loss: bool = True
     harmonic_loss: bool = False  # Disabled for stability
     dynamic_loss_weighting: bool = False  # Disabled for stability
     
-    # FIXED: Enhanced loss weights with numerical stability
+
     reconstruction_weight: float = 1.0
     cqt_loss_weight: float = 1.0  # Reduced from 1.2
     time_loss_weight: float = 0.1
     vq_weight: float = 0.01  # Reduced
     adversarial_weight: float = 0.05  # Reduced
     
-    # FIXED: Enhanced compression loss weights with stability
+
     compression_loss_weight: float = 0.1  # Reduced
     information_bottleneck_loss_weight: float = 0.05  # Reduced
     perceptual_loss_weight: float = 0.2  # Reduced
     mel_loss_weight: float = 0.15  # Reduced
     harmonic_loss_weight: float = 0.0   # Disabled
     
-    # FIXED: Enhanced CQT loss configuration with stability
+
     w_cqt: float = 1.0  # Reduced from 1.2
     w_temporal: float = 0.5  # Reduced
     w_harmonic: float = 0.0  # Disabled
     w_compression: float = 0.2  # Reduced
     
-    # FIXED: Enhanced detail refinement (disabled for stability)
+
     enable_detail_refinement: bool = False  # Disabled
     s6_state_based_detail_generation: bool = False  # Disabled
     style_consistent_refinement: bool = False  # Disabled
     adaptive_refinement_level: bool = False  # Disabled
     
-    # FIXED: Enhanced transfer learning (disabled for DDP compatibility)
+
     enable_transfer_learning_optimization: bool = False  # Disabled
     s6_core_freeze_epochs: int = 0  # Disabled for DDP
     progressive_layer_unfreezing: bool = False  # Disabled
@@ -155,35 +151,35 @@ class DCAEConfig:
     distillation_temperature: float = 3.0
     distillation_weight: float = 0.0  # Disabled
     
-    # FIXED: Enhanced training configuration for larger models and stability
+
     learning_rate: float = 1.2e-4  # Conservative for larger models
     min_lr: float = 5e-7  # More conservative
     weight_decay: float = 0.02  # Slightly increased for regularization
     grad_clip: float = 0.5  # Reduced for stability
     
-    # FIXED: Enhanced data configuration for larger models
+
     batch_size: int = 8  # Adjusted for larger models
     num_workers: int = 0  # Disabled for DDP safety
     epochs: int = 200
     audio_duration: float = 1.0  # Conservative for V100
     
-    # FIXED: Enhanced checkpoint configuration
+
     save_interval: int = 5
     keep_last_n: int = 3  # Conservative
     
-    # FIXED: Enhanced augmentation (reduced for stability)
+
     lossy_augmentation_prob: float = 0.3  # Reduced
     vbr_range: Tuple[int, int] = (0, 5)  # Reduced range
     restoration_loss_weight: float = 0.1  # Reduced
     
-    # FIXED: Enhanced optimization flags with stability focus
+
     use_weight_norm: bool = True
     use_ema: bool = True
     ema_decay: float = 0.999  # Conservative
     ema_update_after: int = 100  # More conservative
     ema_update_every: int = 10   # More frequent
     
-    # FIXED: Enhanced augmentation configuration with safety
+
     use_augmentation: bool = True
     augmentation_prob: float = 0.3  # Reduced for stability
     gain_range: Tuple[float, float] = (-1.5, 1.5)  # Reduced range
@@ -195,7 +191,7 @@ class DCAEConfig:
     preserve_musical_structure: bool = True
     harmonic_distortion_prob: float = 0.05  # Reduced
     
-    # FIXED: Enhanced harmonic-percussive separation (simplified for stability)
+
     use_harmonic_percussive: bool = False  # Disabled for stability
     hp_kernel_size_h: int = 17
     hp_kernel_size_p: int = 17
@@ -204,10 +200,10 @@ class DCAEConfig:
     hp_learnable: bool = False  # Disabled
     hp_compression_aware: bool = False  # Disabled
     
-    # FIXED: Enhanced model size presets for proper parameter counts
+
     model_size: str = "base"  # "small", "base", "large", "compressed"
     
-    # CRITICAL: Enhanced stability and compilation settings
+
     disable_torch_compile: bool = True
     disable_dynamo_tracing: bool = True
     enable_enhanced_numerical_stability: bool = True
@@ -231,7 +227,7 @@ class DCAEConfig:
                 "estimated_parameters": "25M"
             }
         elif self.model_size == "base":
-            # FIXED: Base model configuration for ~60M parameters
+
             return {
                 "encoder_base_channels": 80,   # Increased from 48
                 "decoder_base_channels": 80,   # Increased from 48
@@ -241,14 +237,14 @@ class DCAEConfig:
                 "ssm_d_state": 40,            # Increased from 24
                 "chunk_size": 256,
                 "cqt_projection_dims": 80,    # Increased from 56
-                # FIXED: Additional parameters for proper sizing
+
                 "ssm_layers": [3, 3, 3, 3],   # Increased layers
                 "encoder_channels": [40, 80, 160, 320],  # Proper progression
                 "decoder_channels": [320, 160, 80, 40],  # Proper progression
                 "estimated_parameters": "60M"
             }
         elif self.model_size == "large":
-            # FIXED: Large model configuration for ~100M parameters
+
             return {
                 "encoder_base_channels": 112,  # Increased significantly
                 "decoder_base_channels": 112,  # Increased significantly
@@ -258,7 +254,7 @@ class DCAEConfig:
                 "ssm_d_state": 56,            # Increased significantly
                 "chunk_size": 512,
                 "cqt_projection_dims": 96,    # Increased from 64
-                # FIXED: Additional parameters for larger model
+
                 "ssm_layers": [4, 4, 4, 4],   # More layers
                 "encoder_channels": [56, 112, 224, 448],  # Larger progression
                 "decoder_channels": [448, 224, 112, 56],  # Larger progression
@@ -284,26 +280,26 @@ class DCAEConfig:
         """Enhanced model size update with proper parameter scaling"""
         config_updates = self.get_model_config()
         
-        # FIXED: Apply all configuration updates
+
         for key, value in config_updates.items():
             if hasattr(self, key):
                 setattr(self, key, value)
         
-        # FIXED: Update dependent configurations based on model size
+
         if self.model_size == "base":
-            # FIXED: Adjust training parameters for base model (60M)
+
             self.batch_size = max(4, self.batch_size // 2)  # Reduce batch size for larger model
             self.learning_rate = 1.0e-4  # Slightly lower LR for stability
             self.grad_clip = 0.5  # Conservative gradient clipping
             
         elif self.model_size == "large":
-            # FIXED: Adjust training parameters for large model (100M)
+
             self.batch_size = max(2, self.batch_size // 4)  # Further reduce batch size
             self.learning_rate = 8e-5  # Lower LR for larger model
             self.grad_clip = 0.3  # More conservative gradient clipping
             self.ema_update_after = 200  # Longer warm-up for larger model
             
-        # FIXED: Update encoder/decoder channel configurations
+
         if 'encoder_channels' in config_updates:
             self.encoder_channels = config_updates['encoder_channels']
         if 'decoder_channels' in config_updates:
@@ -353,7 +349,7 @@ class DCAEConfig:
                 "mel_scale_loss": self.mel_scale_loss
             },
             
-            # FIXED: Enhanced stability and optimization settings
+
             "stability_settings": {
                 "torch_compile_disabled": self.disable_torch_compile,
                 "dynamo_tracing_disabled": self.disable_dynamo_tracing,
@@ -367,7 +363,7 @@ class DCAEConfig:
     def estimate_model_parameters(self) -> int:
         """Estimate total model parameters based on configuration"""
         try:
-            # FIXED: Enhanced parameter estimation for accurate sizing
+
             config = self.get_model_config()
             
             base_channels = config.get('encoder_base_channels', self.encoder_base_channels)
@@ -375,7 +371,7 @@ class DCAEConfig:
             d_state = config.get('ssm_d_state', self.ssm_d_state)
             cqt_dims = config.get('cqt_projection_dims', self.cqt_projection_dims)
             
-            # FIXED: Comprehensive parameter calculation
+
             # CQT Transform parameters
             cqt_params = self.cqt_n_bins * cqt_dims + cqt_dims * 2  # projection layers
             
@@ -396,10 +392,10 @@ class DCAEConfig:
             # Final projection layers
             final_params = current_channels * latent_channels * 9  # final conv
             
-            # FIXED: Total parameter estimation
+
             total_params = cqt_params + encoder_params + decoder_params + final_params
             
-            # FIXED: Model size specific adjustments
+
             if self.model_size == "base":
                 total_params = int(total_params * 1.2)  # Account for additional components
             elif self.model_size == "large":
@@ -429,7 +425,7 @@ class DCAEConfig:
         }
         
         try:
-            # FIXED: Model size validation
+
             param_estimate = validation_result['parameter_estimate']
             target_params = {
                 "small": (20_000_000, 30_000_000),
@@ -446,7 +442,7 @@ class DCAEConfig:
                         f"[{min_params:,}, {max_params:,}] for {self.model_size}"
                     )
             
-            # FIXED: Training stability validation
+
             if self.learning_rate > 2e-3:
                 validation_result['warnings'].append(f"High learning rate: {self.learning_rate}")
                 validation_result['stability_score'] -= 0.1
@@ -459,7 +455,7 @@ class DCAEConfig:
                 validation_result['warnings'].append(f"Large batch size for V100: {self.batch_size}")
                 validation_result['stability_score'] -= 0.1
             
-            # FIXED: Numerical stability validation
+
             if not self.enable_enhanced_numerical_stability:
                 validation_result['errors'].append("Enhanced numerical stability should be enabled")
                 validation_result['valid'] = False
@@ -469,7 +465,7 @@ class DCAEConfig:
                 validation_result['warnings'].append("Checkpointing enabled (may cause NaN)")
                 validation_result['stability_score'] -= 0.2
             
-            # FIXED: DDP compatibility validation
+
             if not self.disable_torch_compile:
                 validation_result['errors'].append("torch.compile should be disabled for DDP")
                 validation_result['valid'] = False
@@ -478,7 +474,7 @@ class DCAEConfig:
                 validation_result['warnings'].append("num_workers > 0 may cause DDP issues")
                 validation_result['stability_score'] -= 0.1
             
-            # FIXED: Loss weight validation
+
             total_loss_weight = (
                 self.cqt_loss_weight + self.time_loss_weight + 
                 self.compression_loss_weight + self.perceptual_loss_weight
@@ -487,7 +483,7 @@ class DCAEConfig:
                 validation_result['warnings'].append(f"High total loss weight: {total_loss_weight}")
                 validation_result['stability_score'] -= 0.1
             
-            # FIXED: Final stability score
+
             validation_result['stability_score'] = max(0.0, min(1.0, validation_result['stability_score']))
             
         except Exception as e:
@@ -501,7 +497,7 @@ class DCAEConfig:
 class CQTSSMConfig:
     """Enhanced CQT-SSM specific configuration with numerical stability"""
     
-    # FIXED: Enhanced CQT Transform parameters
+
     sample_rate: int = 44100
     hop_length: int = 512
     n_bins: int = 84
@@ -511,12 +507,12 @@ class CQTSSMConfig:
     center: bool = True
     pad_mode: str = 'reflect'
     
-    # FIXED: Enhanced compression-specific CQT parameters
+
     enable_cqt_compression: bool = True
     cqt_compression_ratio: float = 0.7  # Increased for stability
     learnable_cqt_basis: bool = True
     
-    # FIXED: Enhanced SSM parameters with larger capacity
+
     d_model: int = 80  # Increased from 64
     d_state: int = 40   # Increased from 24
     d_conv: int = 4
@@ -529,31 +525,31 @@ class CQTSSMConfig:
     bias: bool = True
     conv_bias: bool = True
     
-    # FIXED: Enhanced compression-aware SSM parameters
+
     enable_state_compression: bool = True
     state_compression_ratio: float = 0.8  # Increased for stability
     adaptive_state_pruning: bool = True
     forgetting_gate: bool = True
     
-    # FIXED: Enhanced memory optimization
+
     chunk_size: int = 256
     use_checkpointing: bool = False  # Disabled to prevent NaN
     memory_efficient: bool = True
     gradient_checkpointing_ratio: float = 0.0  # Disabled
     
-    # FIXED: Enhanced multi-scale processing
+
     use_multiscale_ssm: bool = True
     scales: List[str] = field(default_factory=lambda: ['global', 'middle'])  # Reduced for stability
     scale_compression_ratios: List[float] = field(default_factory=lambda: [0.8, 0.7])  # Conservative
     
-    # FIXED: Enhanced harmonic-percussive separation (disabled for stability)
+
     use_hp_separation: bool = False  # Disabled
     hp_kernel_size_h: int = 17
     hp_kernel_size_p: int = 17
     hp_learnable: bool = False  # Disabled
     hp_compression_aware: bool = False  # Disabled
     
-    # CRITICAL: Enhanced stability settings
+
     disable_torch_compile: bool = True
     disable_dynamo_tracing: bool = True
     enable_numerical_stability: bool = True
@@ -564,27 +560,27 @@ class CQTSSMConfig:
 class HiFiGANConfig:
     """Enhanced HiFiGAN Discriminator configuration with stability focus"""
     
-    # FIXED: Enhanced multi-period discriminator (reduced for stability)
+
     periods: List[int] = field(default_factory=lambda: [2, 3, 5])  # Reduced from [2, 3, 5, 7]
     
-    # FIXED: Enhanced multi-scale discriminator (reduced for stability)
+
     scales: int = 2  # Reduced from 3
     downsample_scales: List[int] = field(default_factory=lambda: [2, 2])
     downsample_kernel_sizes: List[int] = field(default_factory=lambda: [4, 4])
     
-    # FIXED: Enhanced CQT-aware discriminator settings (disabled for stability)
+
     use_cqt_discriminator: bool = False  # Disabled for stability
     cqt_n_bins: int = 84
     cqt_hop_length: int = 512
     cqt_compression_aware: bool = False  # Disabled
     
-    # FIXED: Enhanced common settings with stability focus
+
     discriminator_channel_mult: float = 0.7  # Reduced for stability
     use_spectral_norm: bool = False
     use_weight_norm: bool = True
     enable_compression_discrimination: bool = False  # Disabled for stability
     
-    # CRITICAL: Enhanced stability settings
+
     disable_torch_compile: bool = True
     disable_dynamo_tracing: bool = True
     enable_numerical_stability: bool = True
@@ -594,7 +590,7 @@ class HiFiGANConfig:
 class TrainingConfig:
     """Enhanced training configuration with complete numerical stability"""
     
-    # FIXED: Enhanced optimizer configuration for larger models
+
     optimizer: str = "adamw"
     learning_rate: float = 1.0e-4  # Reduced for stability with larger models
     weight_decay: float = 0.02
@@ -602,66 +598,66 @@ class TrainingConfig:
     eps: float = 1e-6  # Conservative epsilon
     fused: bool = True
     
-    # FIXED: Enhanced compression-specific optimizer settings
+
     compression_lr_factor: float = 0.8  # More conservative
     compression_weight_decay: float = 0.025  # Slightly higher
     
-    # FIXED: Enhanced scheduler configuration for stability
+
     scheduler: str = "cosine_annealing_warm_restarts"
     min_lr: float = 5e-7  # More conservative
     warmup_epochs: int = 10  # Longer warmup for larger models
     T_0: int = 50  # Shorter cycles for better control
     T_mult: int = 1
     
-    # FIXED: Enhanced training dynamics for numerical stability
+
     gradient_accumulation_steps: int = 4  # Increased for larger models
     max_grad_norm: float = 0.5  # More conservative
     mixed_precision: str = "fp16"
     
-    # FIXED: Enhanced compression-specific training settings
+
     enable_compression_curriculum: bool = False  # Disabled for stability
     compression_warmup_epochs: int = 0  # Disabled
     adaptive_compression_rate: bool = False  # Disabled
     
-    # FIXED: Enhanced data loading for stability
+
     batch_size: int = 6  # Reduced for larger models
     num_workers: int = 0  # Disabled for DDP safety
     pin_memory: bool = False  # Disabled for DDP safety
     persistent_workers: bool = False  # Disabled
     
-    # FIXED: Enhanced validation configuration
+
     val_check_interval: int = 5  # Less frequent
     val_batches_limit: int = 10  # Reduced for stability
     compression_analysis_interval: int = 10  # Less frequent
     
-    # FIXED: Enhanced checkpointing for stability
+
     save_every_n_epochs: int = 10  # Less frequent
     keep_last_n_checkpoints: int = 2  # Reduced
     save_best_only: bool = True  # More selective
     save_compression_stats: bool = True
     
-    # FIXED: Enhanced logging configuration
+
     log_every_n_steps: int = 200  # Less frequent
     sample_every_n_epochs: int = 20  # Less frequent
     num_samples: int = 2  # Reduced
     
-    # FIXED: Enhanced early stopping for stability
+
     patience: int = 30  # More patience for larger models
     min_delta: float = 1e-5  # Smaller delta
     
-    # FIXED: Enhanced CQT-specific training settings
+
     cqt_loss_start_epoch: int = 0
     harmonic_loss_start_epoch: int = 0  # Disabled
     compression_loss_start_epoch: int = 5  # Delayed start
     perceptual_loss_start_epoch: int = 10  # Delayed start
     progressive_training: bool = False  # Disabled for stability
     
-    # FIXED: Enhanced transfer learning schedule (disabled for DDP)
+
     s6_core_freeze_schedule: List[int] = field(default_factory=lambda: [])  # Disabled
     progressive_unfreeze_schedule: List[int] = field(default_factory=lambda: [])  # Disabled
     knowledge_distillation_epochs: List[int] = field(default_factory=lambda: [])  # Disabled
     
-    # CRITICAL: Enhanced stability settings
+
     disable_torch_compile: bool = True
     disable_dynamo_tracing: bool = True
     enable_numerical_stability: bool = True
@@ -677,47 +673,46 @@ class DataConfig:
     dataset_root: str = "dataset-dcae/datasets/raw"
     cache_dir: Optional[str] = None
     
-    # FIXED: Enhanced audio processing for stability
+
     sample_rate: int = 44100
     audio_duration: float = 1.0  # Conservative for V100
     min_duration: float = 0.5   # Conservative
     max_duration: float = 10.0  # Reduced
     
-    # FIXED: Enhanced data splitting
+
     train_split: float = 0.85  # Slightly increased
     val_split: float = 0.15   # Slightly decreased
     test_split: float = 0.0
     
-    # FIXED: Enhanced augmentation (reduced for stability)
+
     use_augmentation: bool = True
     augmentation_prob: float = 0.3  # Reduced
     compression_aware_augmentation: bool = True
     
-    # FIXED: Enhanced file handling
+
     supported_formats: List[str] = field(default_factory=lambda: ['.wav', '.flac'])  # Reduced
     skip_corrupted: bool = True
     normalize_audio: bool = True
     compression_quality_filter: bool = True
     
-    # FIXED: Enhanced memory management for stability
+
     cache_audio: bool = False
     preload_data: bool = False
     enable_compression_caching: bool = False  # Disabled for stability
     
-    # FIXED: Enhanced quality filters
+
     min_sample_rate: int = 22050
     max_file_size_mb: int = 50  # Reduced
     remove_silence: bool = False
     min_dynamic_range_db: float = 15.0  # Reduced
     max_compression_artifacts: float = 0.15  # Increased tolerance
     
-    # CRITICAL: Enhanced stability settings
+
     disable_torch_compile: bool = True
     disable_dynamo_tracing: bool = True
     enable_numerical_stability: bool = True
 
 
-# ==================== Enhanced Factory Functions ====================
 
 def create_enhanced_cqt_ssm_config(
     model_size: str = "base",
@@ -755,7 +750,7 @@ def create_enhanced_cqt_ssm_config(
     config.batch_size = batch_size
     config.use_augmentation = use_augmentation
     
-    # CRITICAL: Enhanced stability settings
+
     config.disable_torch_compile = disable_torch_compile
     config.disable_dynamo_tracing = True
     config.enable_enhanced_numerical_stability = enable_enhanced_numerical_stability
@@ -807,7 +802,7 @@ def create_enhanced_cqt_ssm_config(
         else:
             print(f"Warning: Unknown configuration parameter: {key}")
     
-    # FIXED: Validate configuration
+
     validation = config.validate_configuration()
     if not validation['valid']:
         print("⚠️ Configuration validation failed:")
@@ -826,7 +821,6 @@ def create_enhanced_cqt_ssm_config(
     return config
 
 
-# ==================== Enhanced Presets ====================
 
 def get_enhanced_high_quality_config() -> DCAEConfig:
     """Enhanced configuration for maximum quality with 60M parameters"""
