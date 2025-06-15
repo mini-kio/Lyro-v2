@@ -1,8 +1,5 @@
 # lyro/dataset/validate_dataset.py
-"""
-Dataset Validation Script with TTS Support
-데이터셋 무결성 검증 및 통계 분석 (TTS 포함)
-"""
+"""Dataset validation and statistics utilities."""
 
 import os
 import sys

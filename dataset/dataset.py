@@ -1,8 +1,5 @@
 # lyro/dataset/dataset.py
-"""
-Enhanced LYRO Dataset Implementation with TTS Support
-T-1: Mix-scale Augmentation Integration + TTS Data Support
-"""
+"""Dataset utilities with optional TTS support."""
 
 import os
 import json

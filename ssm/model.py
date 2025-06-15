@@ -1,9 +1,5 @@
 # lyro/ssm/model.py - 보수적 DDP 호환 S6-SSM (NaN/Inf 완전 수정)
-"""
-Conservative DDP Compatible Lyro SSM Implementation with S6 (Mamba-2)
-COMPLETELY FIXED: NaN/Inf 값 완전 제거 + 메모리 효율성과 DDP 안정성 극대화
-OPTIMIZED: 수치적 안정성 강화 및 안전한 초기화 보장
-"""
+"""Conservative S6-based state-space model optimized for stability."""
 
 import torch
 import torch.nn as nn
@@ -15,12 +11,12 @@ from einops import rearrange, repeat
 import os
 import gc
 
-# CRITICAL: Disable torch._dynamo completely at SSM level for DDP compatibility
+
 import torch._dynamo
 torch._dynamo.config.disable = True
 torch._dynamo.config.suppress_errors = True
 
-# CRITICAL: Disable compilation completely for DDP
+
 os.environ['TORCH_COMPILE_DISABLE'] = '1'
 os.environ['TORCHDYNAMO_DISABLE'] = '1'
 
@@ -35,7 +31,6 @@ except ImportError:
     TRITON_AVAILABLE = False
 
 
-# ==================== 포괄적 함수 호출 검증 및 추가 안전장치 ====================
 
 def validate_tensor_safely(x: torch.Tensor, name: str = "tensor", 
                           min_val: float = -10.0, max_val: float = 10.0) -> torch.Tensor:
@@ -87,7 +82,6 @@ def check_and_fix_tensor(x: torch.Tensor, name: str = "tensor", fill_value: floa
     return x
 
 
-# ==================== 완전히 안전한 S6 Core Components ====================
 
 class NumericallyStableS6StateSpaceKernel(nn.Module):
     """
@@ -122,7 +116,7 @@ class NumericallyStableS6StateSpaceKernel(nn.Module):
         self.expand = expand
         self.d_inner = d_model * expand
         
-        # FIXED: 매우 보수적인 headdim computation
+
         self.headdim = min(headdim, self.d_inner // 4)  # 더 보수적
         if self.d_inner % self.headdim != 0:
             self.headdim = max(1, self.d_inner // 8)  # 매우 보수적 fallback
@@ -138,10 +132,10 @@ class NumericallyStableS6StateSpaceKernel(nn.Module):
         if self.nheads % self.ngroups != 0:
             self.ngroups = 1
         
-        # FIXED: 매우 보수적 input projections
+
         self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=bias)
         
-        # FIXED: 매우 보수적 convolution
+
         self.conv1d = nn.Conv1d(
             in_channels=self.d_inner,
             out_channels=self.d_inner, 
@@ -151,19 +145,19 @@ class NumericallyStableS6StateSpaceKernel(nn.Module):
             padding=d_conv - 1,
         )
         
-        # FIXED: 매우 보수적 SSM parameters
+
         self.A_log = nn.Parameter(torch.empty(self.nheads))
         self.D = nn.Parameter(torch.ones(self.nheads))
         self.dt_bias = nn.Parameter(torch.empty(self.nheads))
         
-        # FIXED: 매우 보수적 shared projections
+
         self.x_proj = nn.Linear(self.d_inner, d_state * 2, bias=False)
         self.dt_proj = nn.Linear(self.d_inner, self.nheads, bias=True)
         
         # Output projection
         self.out_proj = nn.Linear(self.d_inner, d_model, bias=bias)
         
-        # FIXED: 매우 보수적 normalization
+
         self.norm = nn.LayerNorm(self.d_inner, eps=1e-6)
         
         # 수치적 안정성을 위한 추가 파라미터
@@ -225,7 +219,7 @@ class NumericallyStableS6StateSpaceKernel(nn.Module):
         # Safe activation
         x = torch.tanh(x * 0.5)  # 매우 보수적인 activation
         
-        # FIXED: 수치적으로 완전히 안전한 SSM computation
+
         y = self.ultra_safe_ssm_computation(x)
         y = check_and_fix_tensor(y, "ssm_output", 0.0)
         
@@ -270,7 +264,7 @@ class NumericallyStableS6StateSpaceKernel(nn.Module):
         A = -safe_exp(A_log_safe) * 0.1  # 매우 작은 스케일
         A = check_and_fix_tensor(A, "A_matrix", -0.1)
         
-        # FIXED: 극도로 안전한 unified scan
+
         y = self._ultra_safe_scan(x, A, B, C, dt, self.D)
         
         return y
@@ -388,7 +382,6 @@ class NumericallyStableS6Block(nn.Module):
         return output
 
 
-# ==================== 안전한 Multi-Scale S6 ====================
 
 class NumericallyStableMultiScaleS6(nn.Module):
     """수치적으로 안전한 Multi-scale S6"""
@@ -463,7 +456,6 @@ class NumericallyStableMultiScaleS6(nn.Module):
         return output
 
 
-# ==================== 안전한 Conditional Embeddings ====================
 
 class NumericallyStableConditionalEmbedding(nn.Module):
     """수치적으로 안전한 conditioning"""
@@ -576,7 +568,6 @@ class NumericallyStableSinusoidalEmbedding(nn.Module):
         return emb
 
 
-# ==================== 안전한 S6 U-Net Architecture ====================
 
 class NumericallyStableS6UNetBlock(nn.Module):
     """수치적으로 안전한 S6 + U-Net block"""
@@ -649,7 +640,6 @@ class NumericallyStableS6UNetBlock(nn.Module):
         return x
 
 
-# ==================== 완전히 안전한 Lyro S6 U-Net ====================
 
 class NumericallyStableLyroS6UNet(nn.Module):
     """
@@ -903,7 +893,6 @@ class NumericallyStableLyroS6UNet(nn.Module):
         return velocity
 
 
-# ==================== 안전한 Task Controllers & Utilities ====================
 
 class NumericallyStableTaskController:
     """수치적으로 안전한 task control"""
@@ -984,7 +973,6 @@ class NumericallyStableEOSTokenHandler:
         return logits
 
 
-# ==================== 안전한 Model Factory ====================
 
 def create_numerically_stable_lyro_s6_model(
     input_channels: int = 8,
@@ -1044,7 +1032,7 @@ def create_numerically_stable_lyro_s6_model(
     model._use_mixed_precision = use_mixed_precision
     model._compile_mode = compile_mode
     
-    # CRITICAL: torch.compile() DISABLED
+
     if use_torch_compile:
         print(f"⚠️ torch.compile() DISABLED for numerical stability")
         print("✅ Model created without compilation for stability")
@@ -1053,7 +1041,6 @@ def create_numerically_stable_lyro_s6_model(
     return model
 
 
-# ==================== Backward Compatibility ====================
 
 # Aliases for backward compatibility
 LyroSSMUNet = NumericallyStableLyroS6UNet

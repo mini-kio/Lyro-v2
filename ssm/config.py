@@ -401,7 +401,6 @@ class S6ModelConfig:
                 setattr(target_config, key, value)
 
 
-# ==================== S6 편의 함수 ====================
 
 def create_s6_ssm_config(
     model_size: str = "base",
@@ -535,7 +534,6 @@ def get_s6_xl_config() -> S6SSMConfig:
     )
 
 
-# ==================== S6 성능 프리셋 ====================
 
 class S6PerformancePresets:
     """S6 성능 프리셋 관리"""
@@ -597,7 +595,6 @@ class S6PerformancePresets:
         }
 
 
-# ==================== S6 설정 검증 ====================
 
 def validate_s6_config(config: S6SSMConfig) -> Tuple[bool, List[str]]:
     """S6 설정 검증"""

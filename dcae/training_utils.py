@@ -1,9 +1,5 @@
 # lyro/dcae/training_utils.py - NaN Loss 해결 및 강화 버전
-"""
-DDP Compatible Training Utilities for S6-SSM Compression Optimized CQT-SSM DCAE
-FIXED: NaN loss 근본 원인 해결 + 수치적 안정성 극대화
-OPTIMIZED: Enhanced numerical stability and gradient flow for larger models
-"""
+"""Training utilities for S6-SSM DCAE with improved stability."""
 
 import torch
 import torch.nn as nn
@@ -22,17 +18,16 @@ import math
 import os
 import gc
 
-# CRITICAL: Disable torch._dynamo completely at utils level
+
 import torch._dynamo
 torch._dynamo.config.disable = True
 torch._dynamo.config.suppress_errors = True
 
-# CRITICAL: Disable compilation completely
+
 os.environ['TORCH_COMPILE_DISABLE'] = '1'
 os.environ['TORCHDYNAMO_DISABLE'] = '1'
 
 
-# ==================== Enhanced Utility Functions ====================
 
 def safe_tensor_operation(tensor: torch.Tensor, operation: str = "mean", eps: float = 1e-8) -> torch.Tensor:
     """Safe tensor operations to prevent NaN"""
@@ -103,7 +98,6 @@ def safe_div(numerator: torch.Tensor, denominator: torch.Tensor, eps: float = 1e
     return numerator / torch.clamp(denominator, min=eps)
 
 
-# ==================== Enhanced DDP Compatible EMA Wrapper ====================
 
 class DDPCompatibleEMAWrapper:
     """
@@ -116,13 +110,13 @@ class DDPCompatibleEMAWrapper:
         model: nn.Module,
         decay: float = 0.999,
         device: Optional[torch.device] = None,
-        update_after: int = 100,  # FIXED: More conservative start
-        update_every: int = 10,   # FIXED: More frequent updates
-        # FIXED: Enhanced decay rates with numerical stability
+        update_after: int = 100,
+        update_every: int = 10,
+
         compression_decay: float = 0.9995,
         s6_core_decay: float = 0.9998,
         skip_decay: float = 0.999,
-        # FIXED: Additional stability parameters
+
         enable_gradient_monitoring: bool = True,
         nan_detection_threshold: int = 3,
     ):
@@ -138,7 +132,7 @@ class DDPCompatibleEMAWrapper:
         self.update_after = update_after
         self.update_every = update_every
         
-        # FIXED: Enhanced monitoring
+
         self.enable_gradient_monitoring = enable_gradient_monitoring
         self.nan_detection_threshold = nan_detection_threshold
         self.nan_count = 0
@@ -148,11 +142,11 @@ class DDPCompatibleEMAWrapper:
         self.backup = {}
         self.component_types = {}
         
-        # FIXED: Enhanced loss tracking with stability
+
         self.compression_loss_history = deque(maxlen=10)
         self.gradient_norm_history = deque(maxlen=5)
         
-        # CRITICAL: Enhanced immediate initialization
+
         self._initialized = True
         self._force_initialize_immediately()
         
@@ -162,16 +156,16 @@ class DDPCompatibleEMAWrapper:
             success_count = 0
             total_params = 0
             
-            # FIXED: Enhanced parameter initialization with health checks
+
             for name, param in self.model.named_parameters():
                 if param.requires_grad and validate_tensor_health(param, f"param_{name}"):
                     total_params += 1
                     
-                    # FIXED: Safe parameter cloning with validation
+
                     try:
                         shadow_param = param.data.clone().detach().to(self.device)
                         
-                        # FIXED: Health check for shadow parameter
+
                         if validate_tensor_health(shadow_param, f"shadow_{name}"):
                             self.shadow[name] = shadow_param
                             self.component_types[name] = self._classify_parameter_component(name)
@@ -203,7 +197,7 @@ class DDPCompatibleEMAWrapper:
         """
         name_lower = name.lower()
         
-        # FIXED: More comprehensive classification
+
         if any(keyword in name_lower for keyword in [
             'cqt_transform', 'compression_aware', 'channel_pruner', 'frequency_projection'
         ]):
@@ -233,14 +227,14 @@ class DDPCompatibleEMAWrapper:
         if compression_loss is not None and not (math.isnan(compression_loss) or math.isinf(compression_loss)):
             self.compression_loss_history.append(compression_loss)
         
-        # FIXED: Enhanced update conditions with stability checks
+
         should_update = (
             self.step_count > self.update_after and 
             self.step_count % self.update_every == 0 and
             self.nan_count < self.nan_detection_threshold
         )
         
-        # FIXED: Enhanced EMA calculation with comprehensive health checks
+
         try:
             with torch.no_grad():
                 updated_params = 0
@@ -251,14 +245,14 @@ class DDPCompatibleEMAWrapper:
                     if param.requires_grad and name in self.shadow:
                         total_params += 1
                         
-                        # FIXED: Enhanced parameter health validation
+
                         param_healthy = validate_tensor_health(param, f"ema_param_{name}")
                         shadow_healthy = validate_tensor_health(self.shadow[name], f"ema_shadow_{name}")
                         
                         if param_healthy and shadow_healthy:
                             component_type = self.component_types[name]
                             
-                            # FIXED: Enhanced decay rate selection
+
                             if component_type == 'compression':
                                 decay = self.compression_decay
                             elif component_type == 's6_core':
@@ -271,18 +265,18 @@ class DDPCompatibleEMAWrapper:
                                 decay = self.base_decay
                             
                             if should_update:
-                                # FIXED: Safe EMA update with overflow protection
+
                                 try:
                                     param_data = param.data.to(self.device)
                                     old_shadow = self.shadow[name]
                                     
-                                    # FIXED: Safe interpolation with clamping
+
                                     new_shadow = decay * old_shadow + (1.0 - decay) * param_data
                                     
-                                    # FIXED: Clamp to prevent extreme values
+
                                     new_shadow = torch.clamp(new_shadow, min=-100.0, max=100.0)
                                     
-                                    # FIXED: Final health check before assignment
+
                                     if validate_tensor_health(new_shadow, f"new_shadow_{name}"):
                                         self.shadow[name] = new_shadow
                                         updated_params += 1
@@ -299,7 +293,7 @@ class DDPCompatibleEMAWrapper:
                                     print(f"⚠️ EMA update failed for {name}: {e}")
                                     self.nan_count += 1
                             else:
-                                # FIXED: Maintain gradient flow even when not updating
+
                                 dummy_update = param.data.to(self.device) * 0.0
                                 self.shadow[name] = self.shadow[name] + dummy_update
                                 updated_params += 1
@@ -313,13 +307,13 @@ class DDPCompatibleEMAWrapper:
                                 self.shadow[name] = torch.zeros_like(param.data, device=self.device)
                             self.nan_count += 1
                 
-                # FIXED: Update gradient norm history
+
                 if gradient_norms and self.enable_gradient_monitoring:
                     avg_grad_norm = np.mean(gradient_norms)
                     if not (math.isnan(avg_grad_norm) or math.isinf(avg_grad_norm)):
                         self.gradient_norm_history.append(avg_grad_norm)
                 
-                # FIXED: Reset NaN count if update was successful
+
                 if updated_params == total_params:
                     self.nan_count = max(0, self.nan_count - 1)
                         
@@ -340,11 +334,11 @@ class DDPCompatibleEMAWrapper:
                 if param.requires_grad and name in self.shadow:
                     total_count += 1
                     
-                    # FIXED: Enhanced health checks before application
+
                     shadow_healthy = validate_tensor_health(self.shadow[name], f"apply_shadow_{name}")
                     
                     if shadow_healthy:
-                        # FIXED: Safe backup and application
+
                         try:
                             self.backup[name] = param.data.clone()
                             param.data.copy_(self.shadow[name])
@@ -401,7 +395,7 @@ class DDPCompatibleEMAWrapper:
                 if validate_tensor_health(shadow, verbose=False):
                     healthy_shadows += 1
             
-            # FIXED: Enhanced statistics with health metrics
+
             stats = {
                 'step_count': self.step_count,
                 'initialized': self._initialized,
@@ -439,7 +433,7 @@ class DDPCompatibleEMAWrapper:
             return {'initialized': False}
         
         try:
-            # FIXED: Filter out unhealthy shadows before saving
+
             healthy_shadows = {}
             for name, shadow in self.shadow.items():
                 if validate_tensor_health(shadow, verbose=False):
@@ -472,7 +466,7 @@ class DDPCompatibleEMAWrapper:
             return
         
         try:
-            # FIXED: Validate loaded shadows
+
             loaded_shadows = state_dict.get('shadow', {})
             valid_shadows = {}
             
@@ -534,7 +528,6 @@ class DDPCompatibleEMAContext:
                 print(f"⚠️ EMA context exit failed: {e}")
 
 
-# ==================== Enhanced Training State Manager ====================
 
 class StaticTrainingStateManager:
     """
@@ -549,24 +542,24 @@ class StaticTrainingStateManager:
         self.current_epoch = 0
         self.global_step = 0
         
-        # FIXED: Enhanced monitoring
+
         self.nan_detection_count = 0
         self.gradient_explosion_count = 0
         self.loss_spike_count = 0
         
-        # FIXED: Enhanced augmentation with stability
+
         self.augmentation = self._create_enhanced_augmentation()
         self.ema_wrapper = None
         
-        # FIXED: Enhanced compression tracking with health monitoring
+
         self.compression_metrics_history = defaultdict(lambda: deque(maxlen=5))
         self.numerical_stability_metrics = defaultdict(lambda: deque(maxlen=3))
         
-        # FIXED: Enhanced static training parameters
+
         self.static_batch_size = config.batch_size
         self.static_learning_rate = config.learning_rate
         
-        # FIXED: Health monitoring thresholds
+
         self.health_thresholds = {
             'max_gradient_norm': 10.0,
             'max_loss_value': 100.0,
@@ -605,7 +598,7 @@ class StaticTrainingStateManager:
         """Update EMA with enhanced health monitoring"""
         if self.ema_wrapper is not None:
             try:
-                # FIXED: Health check for compression loss
+
                 safe_loss = None
                 if compression_loss is not None:
                     if not (math.isnan(compression_loss) or math.isinf(compression_loss)):
@@ -620,7 +613,7 @@ class StaticTrainingStateManager:
                 
                 self.ema_wrapper.update(safe_loss)
                 
-                # FIXED: Monitor EMA health
+
                 ema_stats = self.ema_wrapper.get_ema_stats()
                 if ema_stats.get('shadow_health_ratio', 1.0) < 0.8:
                     print(f"⚠️ EMA health degraded: {ema_stats.get('shadow_health_ratio', 0.0):.2f}")
@@ -632,11 +625,11 @@ class StaticTrainingStateManager:
         """Apply enhanced augmentation with safety checks"""
         if self.augmentation is not None:
             try:
-                # FIXED: Input health check
+
                 if validate_tensor_health(audio, "augmentation_input"):
                     augmented = self.augmentation(audio)
                     
-                    # FIXED: Output health check
+
                     if validate_tensor_health(augmented, "augmentation_output"):
                         return augmented
                     else:
@@ -657,7 +650,7 @@ class StaticTrainingStateManager:
             for key, value in metrics.items():
                 if isinstance(value, (int, float)):
                     if not (math.isnan(value) or math.isinf(value)):
-                        # FIXED: Range validation
+
                         if abs(value) < 1e6:  # Reasonable range check
                             healthy_metrics[key] = value
                             self.compression_metrics_history[key].append(value)
@@ -671,7 +664,7 @@ class StaticTrainingStateManager:
                         healthy_metrics[key] = scalar_value
                         self.compression_metrics_history[key].append(scalar_value)
             
-            # FIXED: Update numerical stability metrics
+
             if healthy_metrics:
                 avg_metric_value = np.mean(list(healthy_metrics.values()))
                 self.numerical_stability_metrics['avg_metrics'].append(avg_metric_value)
@@ -689,7 +682,7 @@ class StaticTrainingStateManager:
         }
         
         try:
-            # FIXED: Loss health check
+
             if validate_tensor_health(loss, "training_loss"):
                 loss_value = loss.item()
                 
@@ -709,7 +702,7 @@ class StaticTrainingStateManager:
                 health_report['errors'].append('Invalid loss tensor')
                 self.nan_detection_count += 1
             
-            # FIXED: Gradient health check
+
             if gradients is not None:
                 total_grad_norm = 0.0
                 nan_grad_count = 0
@@ -733,7 +726,7 @@ class StaticTrainingStateManager:
                     health_report['warnings'].append(f'High gradient norm: {total_grad_norm:.4f}')
                     self.gradient_explosion_count += 1
             
-            # FIXED: Generate recommendations
+
             if self.nan_detection_count >= self.health_thresholds['max_nan_tolerance']:
                 health_report['recommendations'].append('Consider reducing learning rate')
                 health_report['recommendations'].append('Check model architecture for numerical instability')
@@ -742,7 +735,7 @@ class StaticTrainingStateManager:
                 health_report['recommendations'].append('Consider gradient clipping')
                 health_report['recommendations'].append('Verify data preprocessing')
             
-            # FIXED: Update stability metrics
+
             stability_score = 1.0 - (self.nan_detection_count + self.gradient_explosion_count + self.loss_spike_count) / 100.0
             stability_score = max(0.0, min(1.0, stability_score))
             self.numerical_stability_metrics['stability_score'].append(stability_score)
@@ -773,7 +766,7 @@ class StaticTrainingStateManager:
                 'static_batch_size': self.static_batch_size,
                 'static_learning_rate': self.static_learning_rate,
                 
-                # FIXED: Health metrics
+
                 'numerical_health': {
                     'nan_detection_count': self.nan_detection_count,
                     'gradient_explosion_count': self.gradient_explosion_count,
@@ -784,7 +777,7 @@ class StaticTrainingStateManager:
                     )
                 },
                 
-                # FIXED: Enhanced flags
+
                 'ddp_compatible': True,
                 'numerical_stability_enhanced': True,
                 'progressive_unfreezing_disabled': True,
@@ -792,7 +785,7 @@ class StaticTrainingStateManager:
                 'health_monitoring_enabled': True
             }
             
-            # FIXED: EMA statistics with error handling
+
             if self.ema_wrapper is not None:
                 try:
                     ema_stats = self.ema_wrapper.get_ema_stats()
@@ -814,7 +807,6 @@ class StaticTrainingStateManager:
             }
 
 
-# ==================== Enhanced Augmentation ====================
 
 class EnhancedAugmentation:
     """
@@ -836,7 +828,7 @@ class EnhancedAugmentation:
         self.noise_level = noise_level
         self.enable_safety_checks = enable_safety_checks
         
-        # FIXED: Safety thresholds
+
         self.max_gain_db = 6.0  # Conservative limit
         self.max_noise_level = 0.01  # Conservative limit
         self.max_amplitude = 0.95  # Prevent clipping
@@ -848,14 +840,14 @@ class EnhancedAugmentation:
         if random.random() > self.augmentation_prob:
             return audio
         
-        # FIXED: Input validation
+
         if self.enable_safety_checks and not validate_tensor_health(audio, "augmentation_input"):
             return audio
         
         try:
             original_audio = audio.clone()
             
-            # FIXED: Enhanced gain augmentation with safety
+
             if random.random() < 0.5:
                 try:
                     gain_db = random.uniform(*self.gain_range)
@@ -864,12 +856,12 @@ class EnhancedAugmentation:
                     
                     audio = audio * gain_linear
                     
-                    # FIXED: Enhanced amplitude limiting
+
                     max_val = torch.abs(audio).max()
                     if max_val > self.max_amplitude:
                         audio = audio * (self.max_amplitude / (max_val + 1e-8))
                     
-                    # FIXED: Health check after gain
+
                     if self.enable_safety_checks and not validate_tensor_health(audio, "gain_augmented"):
                         audio = original_audio
                         
@@ -877,22 +869,22 @@ class EnhancedAugmentation:
                     print(f"⚠️ Gain augmentation failed: {e}")
                     audio = original_audio
             
-            # FIXED: Enhanced noise augmentation with safety
+
             if random.random() < 0.2:
                 try:
                     safe_noise_level = min(self.noise_level, self.max_noise_level)
                     noise = torch.randn_like(audio) * safe_noise_level
                     
-                    # FIXED: Health check for noise
+
                     if self.enable_safety_checks and validate_tensor_health(noise, "noise"):
                         audio = audio + noise
                         
-                        # FIXED: Amplitude check after noise
+
                         max_val = torch.abs(audio).max()
                         if max_val > self.max_amplitude:
                             audio = audio * (self.max_amplitude / (max_val + 1e-8))
                         
-                        # FIXED: Final health check
+
                         if self.enable_safety_checks and not validate_tensor_health(audio, "noise_augmented"):
                             audio = original_audio
                     else:
@@ -902,13 +894,13 @@ class EnhancedAugmentation:
                     print(f"⚠️ Noise augmentation failed: {e}")
                     audio = original_audio
             
-            # FIXED: Final safety validation
+
             if self.enable_safety_checks:
                 if not validate_tensor_health(audio, "final_augmented"):
                     print("⚠️ Final augmentation validation failed")
                     return original_audio
                 
-                # FIXED: Range check
+
                 if torch.abs(audio).max() > 1.0:
                     audio = torch.clamp(audio, -1.0, 1.0)
                     
@@ -919,13 +911,12 @@ class EnhancedAugmentation:
         return audio
 
 
-# ==================== Enhanced Configuration ====================
 
 class S6SSMCompressionConfig:
     """Enhanced configuration with numerical stability focus"""
     
     def __init__(self):
-        # FIXED: Enhanced S6-SSM configuration for larger models
+
         self.latent_channels = 12  # Increased from 6 for larger models
         self.encoder_base_channels = 80  # Increased from 48
         self.decoder_base_channels = 80  # Increased from 48
@@ -933,14 +924,14 @@ class S6SSMCompressionConfig:
         self.dual_channel_processing = True
         self.use_weight_norm = True
         
-        # FIXED: Enhanced audio processing
+
         self.sample_rate = 44100
         self.n_bins = 84
         self.hop_length = 512
         self.bins_per_octave = 12
         self.fmin = 32.7
         
-        # FIXED: Enhanced compression configuration for larger models
+
         self.enable_forced_compression = True
         self.cqt_projection_dims = 80  # Increased from 48
         self.temporal_compression_stride = 2
@@ -948,7 +939,7 @@ class S6SSMCompressionConfig:
         self.target_latent_channels = 6  # Increased from 4
         self.information_bottleneck_weight = 0.05
         
-        # FIXED: Enhanced S6-SSM optimization for larger models
+
         self.enable_compression_aware_s6 = True
         self.selective_state_saving = True
         self.adaptive_forgetting_rate = 0.05
@@ -958,7 +949,7 @@ class S6SSMCompressionConfig:
         self.cross_scale_attention = False  # Disabled for stability
         self.enable_semantic_guidance = False  # Disabled for stability
         
-        # FIXED: Enhanced skip connection configuration
+
         self.enable_selective_skip = True
         self.mutual_information_threshold = 0.2
         self.skip_pruning_ratio = 0.3
@@ -967,7 +958,7 @@ class S6SSMCompressionConfig:
         self.adaptive_skip_activation = False  # Disabled
         self.s6_enhanced_skip = True
         
-        # FIXED: Enhanced quality enhancement with stability
+
         self.enable_enhanced_perceptual_loss = True
         self.multi_resolution_stft_loss = False  # Disabled for stability
         self.mel_scale_loss = True
@@ -975,21 +966,21 @@ class S6SSMCompressionConfig:
         self.dynamic_loss_weighting = False  # Disabled for stability
         self.enable_detail_refinement = False  # Disabled for stability
         
-        # CRITICAL: Enhanced DDP compatibility settings
+
         self.enable_transfer_learning_optimization = False
         self.progressive_unfreezing_disabled = True
         self.static_parameters = True
         self.numerical_stability_enhanced = True
         self.nan_prevention_active = True
         
-        # FIXED: Enhanced training parameters for larger models
+
         self.learning_rate = 1.2e-4
         self.weight_decay = 0.02
         self.batch_size = 8  # Adjusted for larger models
         self.epochs = 200
         self.grad_clip = 0.5
         
-        # FIXED: Enhanced EMA configuration with stability
+
         self.use_ema = True
         self.ema_decay = 0.999
         self.compression_ema_decay = 0.9995
@@ -998,13 +989,13 @@ class S6SSMCompressionConfig:
         self.ema_update_after = 100  # More conservative
         self.ema_update_every = 10   # More frequent
         
-        # FIXED: Enhanced augmentation with safety
+
         self.use_augmentation = True
         self.augmentation_prob = 0.3
         self.gain_range = (-1.0, 1.0)
         self.noise_level = 0.001
         
-        # FIXED: Enhanced loss weights with numerical stability
+
         self.cqt_weight = 1.0
         self.time_weight = 0.1
         self.vq_weight = 0.01
@@ -1013,19 +1004,19 @@ class S6SSMCompressionConfig:
         self.information_bottleneck_loss_weight = 0.05
         self.perceptual_loss_weight = 0.2
         
-        # FIXED: Enhanced scheduler configuration
+
         self.scheduler_type = "cosine_annealing_warm_restarts"
         self.min_lr = 5e-7
         self.warmup_epochs = 5
         self.T_0 = 60
         
-        # FIXED: Enhanced data configuration
+
         self.max_length = 44100 * 1  # 1 second
         self.train_split = 0.82
         self.val_split = 0.18
         self.test_split = 0.0
         
-        # CRITICAL: Enhanced DDP and stability flags
+
         self.ddp_compatible = True
         self.disable_torch_compile = True
         self.disable_dynamo_tracing = True
@@ -1033,7 +1024,6 @@ class S6SSMCompressionConfig:
         self.use_safe_operations = True
 
 
-# ==================== Enhanced Utility Functions ====================
 
 def compute_compression_aware_snr(
     original: torch.Tensor, 
@@ -1044,21 +1034,21 @@ def compute_compression_aware_snr(
     Enhanced SNR computation with complete numerical stability
     """
     try:
-        # FIXED: Input validation
+
         if not (validate_tensor_health(original, "snr_original") and 
                validate_tensor_health(reconstructed, "snr_reconstructed")):
             return 0.0
         
-        # FIXED: Safe power computation
+
         signal_power = safe_tensor_operation(original ** 2, "mean")
         noise_power = safe_tensor_operation((original - reconstructed) ** 2, "mean")
         
-        # FIXED: Enhanced SNR calculation with safety
+
         if noise_power > 1e-10:
             snr_linear = safe_div(signal_power, noise_power)
             snr_db = 10 * safe_log(snr_linear) / math.log(10)
             
-            # FIXED: Health check and clamping
+
             if validate_tensor_health(snr_db, "snr_db"):
                 return float(torch.clamp(snr_db, min=0.0, max=60.0).item())
         
@@ -1081,7 +1071,7 @@ def analyze_compression_efficiency(
     try:
         analysis = {}
         
-        # FIXED: Enhanced quality metrics with validation
+
         if (validate_tensor_health(original, "analysis_original") and 
            validate_tensor_health(reconstructed, "analysis_reconstructed")):
             
@@ -1091,7 +1081,7 @@ def analyze_compression_efficiency(
             analysis['snr_db'] = 0.0
             analysis['si_sdr_db'] = 0.0
         
-        # FIXED: Enhanced compression metrics with validation
+
         if 'compression_ratio' in compression_info:
             compression_ratio = compression_info['compression_ratio']
             if isinstance(compression_ratio, (int, float)) and not (math.isnan(compression_ratio) or math.isinf(compression_ratio)):
@@ -1101,7 +1091,7 @@ def analyze_compression_efficiency(
         else:
             analysis['compression_ratio'] = 1.5
         
-        # FIXED: Enhanced quality preservation with safety
+
         snr_value = analysis.get('snr_db', 0.0)
         compression_ratio = analysis.get('compression_ratio', 1.0)
         
@@ -1110,7 +1100,7 @@ def analyze_compression_efficiency(
         else:
             analysis['quality_per_compression'] = 0.0
         
-        # FIXED: Additional stability metrics
+
         analysis['numerical_stability_score'] = 1.0 if all(
             not (math.isnan(v) or math.isinf(v)) for v in analysis.values()
         ) else 0.0
@@ -1131,12 +1121,12 @@ def analyze_compression_efficiency(
 def compute_si_sdr(reference: torch.Tensor, estimation: torch.Tensor) -> float:
     """Enhanced SI-SDR computation with complete numerical stability"""
     try:
-        # FIXED: Input validation
+
         if not (validate_tensor_health(reference, "si_sdr_reference") and 
                validate_tensor_health(estimation, "si_sdr_estimation")):
             return 0.0
         
-        # FIXED: Enhanced zero-mean processing
+
         reference = reference - safe_tensor_operation(reference, "mean")
         estimation = estimation - safe_tensor_operation(estimation, "mean")
         
@@ -1145,7 +1135,7 @@ def compute_si_sdr(reference: torch.Tensor, estimation: torch.Tensor) -> float:
         if ref_energy < 1e-10:
             return 0.0
         
-        # FIXED: Enhanced SI-SDR computation with safety
+
         numerator = safe_tensor_operation(estimation * reference, "mean")
         denominator = safe_tensor_operation(reference ** 2, "mean")
         
@@ -1169,21 +1159,20 @@ def compute_si_sdr(reference: torch.Tensor, estimation: torch.Tensor) -> float:
         return 0.0
 
 
-# ==================== Enhanced Memory Management ====================
 
 def enhanced_memory_cleanup():
     """Enhanced memory cleanup with thorough clearing"""
     try:
-        # FIXED: More thorough cleanup
+
         for _ in range(3):
             gc.collect()
         
         if torch.cuda.is_available():
-            # FIXED: Clear all caches
+
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
             
-            # FIXED: Reset peak memory stats
+
             torch.cuda.reset_peak_memory_stats()
             
     except Exception as e:

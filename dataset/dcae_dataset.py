@@ -1,9 +1,5 @@
 # lyro/dataset/dcae_dataset.py
-"""
-DDP Compatible S6-SSM Compression Optimized DCAE Dataset Implementation
-FIXED: All DDP autograd hooks conflicts and progressive parameter changes removed
-OPTIMIZED: V100 16GB x4 environment compatibility with static processing
-"""
+"""Dataset for training DCAE models with DDP support."""
 
 import os
 import torch
@@ -75,8 +71,8 @@ class DDPCompatibleFileManager:
         enable_deletion: bool = True, 
         backup_corrupted: bool = False,
         compression_quality_filter: bool = True,
-        min_dynamic_range_db: float = 20.0,  # FIXED: Static threshold
-        max_compression_artifacts: float = 0.1,  # FIXED: Static threshold
+        min_dynamic_range_db: float = 20.0,
+        max_compression_artifacts: float = 0.1,
         max_workers: Optional[int] = None
     ):
         self.enable_deletion = enable_deletion
@@ -89,13 +85,13 @@ class DDPCompatibleFileManager:
         self.lock = threading.Lock()
         self._logged_files = set()
         
-        # FIXED: Static results storage for DDP
+
         self.corrupted_files = set()
         self.low_quality_files = set()
         self.deletion_log = []
         self.quality_log = []
         
-        # FIXED: Static parallel processing for DDP (V100 optimized)
+
         self.max_workers = max_workers or min(4, (os.cpu_count() or 1) + 1)  # V100 conservative
         
         # Create backup directory
@@ -103,7 +99,7 @@ class DDPCompatibleFileManager:
             self.backup_dir = Path("corrupted_files_backup")
             self.backup_dir.mkdir(exist_ok=True)
         
-        # FIXED: Static quality analysis cache for DDP
+
         self.quality_cache = {}
         self.cache_file = Path("ddp_s6_ssm_quality_cache.json")
         self._load_quality_cache()
@@ -169,24 +165,24 @@ class DDPCompatibleFileManager:
         quality_metrics = self._default_quality_metrics()
         
         try:
-            # FIXED: Static load segment for DDP analysis
+
             audio, sr = librosa.load(str(file_path), sr=44100, duration=2.0)  # V100 optimized
             
             if len(audio) == 0:
                 return quality_metrics
             
-            # FIXED: Static dynamic range analysis for DDP
+
             rms_values = librosa.feature.rms(y=audio, hop_length=512)[0]
             if len(rms_values) > 0:
                 dynamic_range = 20 * np.log10(np.max(rms_values) / (np.mean(rms_values) + 1e-10))
                 quality_metrics['dynamic_range_db'] = float(dynamic_range)
             
-            # FIXED: Static compression artifacts detection for DDP
+
             diff = np.diff(audio)
             sudden_changes = np.sum(np.abs(diff) > 0.1) / len(diff)
             quality_metrics['compression_artifacts'] = float(sudden_changes)
             
-            # FIXED: Static harmonic content analysis for DDP
+
             try:
                 harmonic, percussive = librosa.effects.hpss(audio)
                 harmonic_energy = np.mean(harmonic ** 2)
@@ -195,7 +191,7 @@ class DDPCompatibleFileManager:
             except Exception:
                 quality_metrics['harmonic_content'] = 0.5
             
-            # FIXED: Static frequency balance analysis for DDP
+
             try:
                 stft = librosa.stft(audio)
                 magnitude = np.abs(stft)
@@ -212,7 +208,7 @@ class DDPCompatibleFileManager:
             except Exception:
                 quality_metrics['frequency_balance'] = 0.5
             
-            # FIXED: Static overall suitability for compression for DDP
+
             quality_metrics['suitable_for_compression'] = (
                 quality_metrics['dynamic_range_db'] >= self.min_dynamic_range_db and
                 quality_metrics['compression_artifacts'] <= self.max_compression_artifacts and
@@ -382,7 +378,7 @@ class DDPCompatibleAudioValidator:
         DDP compatible deep validation with quality analysis
         """
         try:
-            # FIXED: Static basic file checks for DDP
+
             if not audio_path.exists():
                 return False, "File does not exist", {}
             
@@ -390,7 +386,7 @@ class DDPCompatibleAudioValidator:
             if file_size < 1000:  # Fixed 1KB minimum
                 return False, "File too small", {}
             
-            # FIXED: Static audio format validation for DDP
+
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("error")
@@ -401,7 +397,7 @@ class DDPCompatibleAudioValidator:
             except Exception as e:
                 return False, f"Duration check failed: {str(e)}", {}
             
-            # FIXED: Static quality analysis for DDP
+
             quality_metrics = {}
             if self.file_manager.compression_quality_filter:
                 quality_metrics = self.file_manager.analyze_audio_quality_single(audio_path)
@@ -409,7 +405,7 @@ class DDPCompatibleAudioValidator:
                 if not quality_metrics.get('suitable_for_compression', False):
                     return False, "Low quality for compression", quality_metrics
             
-            # FIXED: Static actual loading test for DDP
+
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("error")
@@ -488,8 +484,8 @@ class DDPCompatibleS6SSMDataset(Dataset):
         target_length: Optional[int] = None,
         # DDP compatible S6-SSM compression parameters
         compression_quality_filter: bool = True,
-        min_dynamic_range_db: float = 20.0,  # FIXED: Static threshold
-        max_compression_artifacts: float = 0.1,  # FIXED: Static threshold
+        min_dynamic_range_db: float = 20.0,
+        max_compression_artifacts: float = 0.1,
         auto_delete_corrupted: bool = True,
         backup_corrupted: bool = False,
         max_retries: int = 3,  # V100 optimized: reduced from 5
@@ -498,7 +494,7 @@ class DDPCompatibleS6SSMDataset(Dataset):
         intelligent_caching: bool = True,
         cache_size_limit_mb: float = 200.0,  # V100 optimized: reduced from 500MB
         # DDP compatible quality preservation
-        preserve_peak_db: float = -1.0,  # FIXED: Static peak level
+        preserve_peak_db: float = -1.0,
         normalize_for_compression: bool = True,
         # V100 optimized parallel processing
         max_workers: Optional[int] = None,
@@ -523,26 +519,26 @@ class DDPCompatibleS6SSMDataset(Dataset):
         self.max_retries = max_retries
         self.batch_size_validation = batch_size_validation
         
-        # FIXED: Static fast mode settings for DDP
+
         self.fast_mode = fast_mode
         self.skip_validation = skip_validation
         self.use_cached_list = use_cached_list
         
-        # FIXED: Static fast mode auto settings for DDP
+
         if self.fast_mode:
             self.skip_validation = True
             self.compression_quality_filter = False
             self.auto_delete_corrupted = False
             safe_print("🚀 DDP Fast Mode: Skipping validation for quick startup!")
         
-        # FIXED: Static S6-SSM compression parameters for DDP
+
         self.compression_quality_filter = compression_quality_filter and not self.fast_mode
         self.memory_efficient_loading = memory_efficient_loading
         self.intelligent_caching = intelligent_caching
         self.preserve_peak_db = preserve_peak_db
         self.normalize_for_compression = normalize_for_compression
         
-        # FIXED: Static enhanced file manager for DDP
+
         self.file_manager = DDPCompatibleFileManager(
             enable_deletion=auto_delete_corrupted and not self.fast_mode,
             backup_corrupted=backup_corrupted,
@@ -552,10 +548,10 @@ class DDPCompatibleS6SSMDataset(Dataset):
             max_workers=max_workers
         )
         
-        # FIXED: Static enhanced validator for DDP
+
         self.validator = DDPCompatibleAudioValidator(self.file_manager)
         
-        # FIXED: Static collect and validate audio files for DDP
+
         if self.fast_mode or self.skip_validation:
             self.audio_paths = self._collect_audio_files_fast()
         else:
@@ -563,7 +559,7 @@ class DDPCompatibleS6SSMDataset(Dataset):
         
         safe_print(f"✅ DDP S6-SSM Dataset: {len(self.audio_paths)} files ready")
         
-        # FIXED: Static enhanced statistics for DDP
+
         if not self.fast_mode:
             stats = self.file_manager.get_stats()
             if stats['total_corrupted'] > 0 or stats['total_low_quality'] > 0:
@@ -572,7 +568,7 @@ class DDPCompatibleS6SSMDataset(Dataset):
                 if stats['deletion_enabled']:
                     safe_print(f"✅ Cleaned {stats['total_deleted']} files")
         
-        # FIXED: Static intelligent caching setup for DDP
+
         self.audio_cache = {}
         self.cache_usage = defaultdict(int)
         self.cache_size_bytes = 0
@@ -583,7 +579,7 @@ class DDPCompatibleS6SSMDataset(Dataset):
             safe_print("Setting up V100 optimized intelligent caching...")
             self._setup_intelligent_cache()
         
-        # FIXED: Static save logs for DDP
+
         if not self.fast_mode:
             stats = self.file_manager.get_stats() 
             if stats['total_deleted'] > 0 or stats['total_low_quality'] > 0:
@@ -595,7 +591,7 @@ class DDPCompatibleS6SSMDataset(Dataset):
         """DDP compatible fast mode file collection"""
         safe_print("🚀 DDP Fast Mode: Quick file collection...")
         
-        # FIXED: Static cached file list check for DDP
+
         cache_file = self.data_root / "ddp_s6_ssm_file_cache.json"
         if self.use_cached_list and cache_file.exists():
             try:
@@ -614,7 +610,7 @@ class DDPCompatibleS6SSMDataset(Dataset):
             except Exception:
                 pass
         
-        # FIXED: Static quick file collection for DDP
+
         audio_extensions = {'.wav', '.mp3', '.flac', '.m4a', '.ogg'}
         audio_paths = []
         
@@ -625,13 +621,13 @@ class DDPCompatibleS6SSMDataset(Dataset):
             if not subfolder_path.exists():
                 continue
             
-            # FIXED: Static quick file search for DDP
+
             for ext in audio_extensions:
                 try:
                     folder_files = list(subfolder_path.glob(f'*{ext}'))
                     folder_files.extend(subfolder_path.glob(f'*{ext.upper()}'))
                     
-                    # FIXED: Static basic file size check for DDP
+
                     for file_path in folder_files:
                         try:
                             if file_path.stat().st_size > 1000:  # Fixed 1KB minimum
@@ -643,7 +639,7 @@ class DDPCompatibleS6SSMDataset(Dataset):
             
             safe_print(f"📁 {subfolder}: {len([p for p in audio_paths if subfolder in str(p)])} files")
         
-        # FIXED: Static save file list cache for DDP
+
         try:
             with open(cache_file, 'w') as f:
                 json.dump([str(p) for p in audio_paths], f)
@@ -669,7 +665,7 @@ class DDPCompatibleS6SSMDataset(Dataset):
                 safe_print(f"⚠️  Subfolder not found: {subfolder}")
                 continue
             
-            # FIXED: Static find all audio files for DDP
+
             folder_files = []
             for ext in audio_extensions:
                 try:
@@ -681,7 +677,7 @@ class DDPCompatibleS6SSMDataset(Dataset):
             total_found += len(folder_files)
             safe_print(f"📁 {subfolder}: {len(folder_files)} files found")
             
-            # FIXED: Static parallel validation for DDP
+
             if folder_files:
                 safe_print(f"🔍 DDP S6-SSM validation: {len(folder_files)} files in {subfolder}...")
                 
@@ -695,14 +691,14 @@ class DDPCompatibleS6SSMDataset(Dataset):
         """DDP compatible file validation in parallel batches"""
         valid_files = []
         
-        # FIXED: Static process files in batches for DDP
+
         batches = [file_paths[i:i + self.batch_size_validation] 
                   for i in range(0, len(file_paths), self.batch_size_validation)]
         
         with tqdm(total=len(file_paths), desc=f"Validating {subfolder}", leave=False) as pbar:
             for batch in batches:
                 try:
-                    # FIXED: Static filter invalid Unicode files for DDP
+
                     valid_batch = []
                     for file_path in batch:
                         safe_path_str = safe_str(file_path)
@@ -713,10 +709,10 @@ class DDPCompatibleS6SSMDataset(Dataset):
                         pbar.update(len(batch))
                         continue
                     
-                    # FIXED: Static parallel validation for DDP
+
                     validation_results = self.validator.validate_audio_batch(valid_batch)
                     
-                    # FIXED: Static collect valid files for DDP
+
                     for file_path, is_valid in validation_results.items():
                         if is_valid:
                             valid_files.append(file_path)
@@ -733,20 +729,20 @@ class DDPCompatibleS6SSMDataset(Dataset):
         """DDP compatible intelligent caching setup (V100 optimized)"""
         cache_candidates = []
         
-        # FIXED: Static sample first 50 files for V100 DDP
+
         for path in self.audio_paths[:50]:
             try:
-                # FIXED: Static quick analysis for caching decision for DDP
+
                 file_size = path.stat().st_size
                 
-                # FIXED: Static prefer smaller files for V100 caching
+
                 if file_size < self.max_file_size_bytes // 3:  # V100 optimized
                     priority = 1.0 / (file_size + 1)
                     cache_candidates.append((path, priority))
             except Exception:
                 continue
         
-        # FIXED: Static sort by priority and cache for DDP
+
         cache_candidates.sort(key=lambda x: x[1], reverse=True)
         
         cached_count = 0
@@ -760,7 +756,7 @@ class DDPCompatibleS6SSMDataset(Dataset):
                     cache_key = safe_str(path)
                     self.audio_cache[cache_key] = audio
                     
-                    # FIXED: Static estimate cache size for DDP
+
                     audio_size = audio.nbytes if hasattr(audio, 'nbytes') else len(audio) * 8
                     self.cache_size_bytes += audio_size
                     cached_count += 1
@@ -775,19 +771,19 @@ class DDPCompatibleS6SSMDataset(Dataset):
         """
         cache_key = safe_str(audio_path)
         
-        # FIXED: Static check intelligent cache for DDP
+
         if self.intelligent_caching and cache_key in self.audio_cache:
             self.cache_usage[cache_key] += 1
             return self.audio_cache[cache_key]
         
-        # FIXED: Static check file manager status for DDP
+
         if (self.file_manager.is_corrupted(audio_path) or 
             self.file_manager.is_low_quality(audio_path)):
             return None
         
         audio = None
         
-        # FIXED: Static memory-efficient loading for V100 DDP
+
         if self.memory_efficient_loading:
             try:
                 with warnings.catch_warnings():
@@ -806,7 +802,7 @@ class DDPCompatibleS6SSMDataset(Dataset):
                     self.file_manager.mark_corrupted(audio_path, str(e))
                     return None
         
-        # FIXED: Static fallback loading for DDP
+
         if audio is None:
             try:
                 audio_tensor, sr = torchaudio.load(str(audio_path))
@@ -822,9 +818,9 @@ class DDPCompatibleS6SSMDataset(Dataset):
             self.file_manager.mark_corrupted(audio_path, "All loading methods failed")
             return None
         
-        # FIXED: Static audio processing for DDP compression optimization
+
         try:
-            # FIXED: Static ensure stereo format for DDP
+
             if audio.ndim == 1:
                 audio = np.stack([audio, audio], axis=0)
             elif audio.shape[0] == 1:
@@ -832,12 +828,12 @@ class DDPCompatibleS6SSMDataset(Dataset):
             elif audio.shape[0] > 2:
                 audio = audio[:2]
             
-            # FIXED: Static length adjustment for DDP
+
             current_length = audio.shape[1]
             target_length = self.target_length
             
             if current_length > target_length:
-                # FIXED: Static smart cropping for DDP
+
                 start_options = [0, current_length - target_length]
                 if current_length > target_length * 2:
                     start_options.append((current_length - target_length) // 2)
@@ -845,7 +841,7 @@ class DDPCompatibleS6SSMDataset(Dataset):
                 start = random.choice(start_options)
                 audio = audio[:, start:start + target_length]
             elif current_length < target_length:
-                # FIXED: Static smart padding/repetition for DDP
+
                 if current_length < target_length // 4:
                     repeat_count = (target_length // current_length) + 1
                     audio = np.tile(audio, (1, repeat_count))
@@ -854,12 +850,12 @@ class DDPCompatibleS6SSMDataset(Dataset):
                     pad_length = target_length - current_length
                     audio = np.pad(audio, ((0, 0), (0, pad_length)), mode='constant')
             
-            # FIXED: Static quality checks for DDP
+
             if np.isnan(audio).any() or np.isinf(audio).any():
                 self.file_manager.mark_corrupted(audio_path, "Contains NaN or Inf")
                 return None
             
-            # FIXED: Static compression-optimized normalization for DDP
+
             if self.normalize_for_compression:
                 max_val = np.abs(audio).max()
                 if max_val > 0:
@@ -869,7 +865,7 @@ class DDPCompatibleS6SSMDataset(Dataset):
                     self.file_manager.mark_corrupted(audio_path, "Silent audio")
                     return None
             
-            # FIXED: Static final quality check for DDP
+
             if self.compression_quality_filter:
                 rms_values = np.sqrt(np.mean(audio ** 2, axis=1))
                 peak_values = np.max(np.abs(audio), axis=1)
@@ -902,11 +898,11 @@ class DDPCompatibleS6SSMDataset(Dataset):
                 
                 audio_path = self.audio_paths[idx]
                 
-                # FIXED: Static load audio for DDP
+
                 audio = self._load_audio_safe(audio_path)
                 
                 if audio is None:
-                    # FIXED: Static find another valid file for DDP
+
                     available_indices = [
                         i for i, p in enumerate(self.audio_paths) 
                         if not (self.file_manager.is_corrupted(p) or self.file_manager.is_low_quality(p))
@@ -916,11 +912,11 @@ class DDPCompatibleS6SSMDataset(Dataset):
                         idx = random.choice(available_indices)
                         continue
                     else:
-                        # FIXED: Static generate dummy audio for DDP
+
                         audio = self._generate_compression_friendly_dummy()
                         break
                 
-                # FIXED: Static final length verification for DDP
+
                 if audio.shape[1] != self.target_length:
                     if audio.shape[1] > self.target_length:
                         audio = audio[:, :self.target_length]
@@ -928,7 +924,7 @@ class DDPCompatibleS6SSMDataset(Dataset):
                         pad_length = self.target_length - audio.shape[1]
                         audio = np.pad(audio, ((0, 0), (0, pad_length)), mode='constant')
                 
-                # FIXED: Static convert to tensor for DDP
+
                 audio_tensor = torch.from_numpy(audio).float()
                 
                 return audio_tensor
@@ -938,22 +934,22 @@ class DDPCompatibleS6SSMDataset(Dataset):
                     idx = random.randint(0, len(self.audio_paths) - 1)
                     continue
                 else:
-                    # FIXED: Static generate compression-friendly dummy for DDP
+
                     audio = self._generate_compression_friendly_dummy()
                     return torch.from_numpy(audio).float()
     
     def _generate_compression_friendly_dummy(self) -> np.ndarray:
         """DDP compatible compression-friendly dummy audio generation"""
-        # FIXED: Static generate pink noise for DDP
+
         audio = np.random.randn(2, self.target_length) * 0.02
         
-        # FIXED: Static add harmonic content for DDP
+
         t = np.linspace(0, self.target_length / self.sample_rate, self.target_length)
         harmonic = 0.05 * np.sin(2 * np.pi * 440 * t)  # Fixed A4 note
         audio[0] += harmonic
         audio[1] += harmonic * 0.8  # Fixed stereo difference
         
-        # FIXED: Static ensure good dynamic range for DDP
+
         audio = audio * 0.7  # Fixed headroom
         
         return audio
@@ -962,7 +958,7 @@ class DDPCompatibleS6SSMDataset(Dataset):
         """DDP compatible comprehensive compression statistics"""
         stats = self.file_manager.get_stats()
         
-        # FIXED: Static add dataset-specific stats for DDP
+
         stats.update({
             'total_files': len(self.audio_paths),
             'target_length': self.target_length,
@@ -996,7 +992,7 @@ class DDPCompatibleCollator:
         filter_corrupted: bool = True,
         # DDP compatible S6-SSM compression specific
         compression_aware_batching: bool = True,
-        quality_threshold: float = 0.1,  # FIXED: Static quality threshold
+        quality_threshold: float = 0.1,
         dynamic_length_adjustment: bool = True
     ):
         """
@@ -1019,7 +1015,7 @@ class DDPCompatibleCollator:
             if torch.isnan(audio).any() or torch.isinf(audio).any():
                 return False
             
-            # FIXED: Static check dynamic range for DDP
+
             rms = torch.sqrt(torch.mean(audio ** 2))
             peak = torch.max(torch.abs(audio))
             
@@ -1028,7 +1024,7 @@ class DDPCompatibleCollator:
                 if dynamic_range_db < 15.0:  # Fixed minimum dynamic range
                     return False
             
-            # FIXED: Static check for artifacts for DDP
+
             diff = torch.diff(audio.mean(0))
             sudden_changes = torch.sum(torch.abs(diff) > 0.1) / len(diff)
             if sudden_changes > 0.05:  # Fixed threshold
@@ -1047,14 +1043,14 @@ class DDPCompatibleCollator:
         if current_length == target_length:
             return audio
         elif current_length > target_length:
-            # FIXED: Static smart cropping for DDP
+
             if self.dynamic_length_adjustment:
-                # FIXED: Static find quietest segment for DDP
+
                 segment_size = current_length - target_length
                 min_energy = float('inf')
                 best_start = 0
                 
-                # FIXED: Static check few positions for DDP
+
                 for start in range(0, segment_size + 1, max(1, segment_size // 10)):
                     segment = audio[:, start:start + target_length]
                     energy = torch.mean(segment ** 2)
@@ -1066,21 +1062,21 @@ class DDPCompatibleCollator:
             else:
                 return audio[:, :target_length]
         else:
-            # FIXED: Static smart padding for DDP
+
             pad_length = target_length - current_length
             
             if pad_length <= current_length and current_length > 1:
-                # FIXED: Static reflection padding for DDP
+
                 return torch.nn.functional.pad(
                     audio, (0, pad_length), mode='reflect'
                 )
             else:
-                # FIXED: Static zero padding with fade for DDP
+
                 padded = torch.nn.functional.pad(
                     audio, (0, pad_length), mode='constant', value=0
                 )
                 
-                # FIXED: Static apply fade for DDP
+
                 if current_length > 100:
                     fade_length = min(100, current_length // 10)
                     fade = torch.linspace(1, 0, fade_length)
@@ -1092,7 +1088,7 @@ class DDPCompatibleCollator:
         """
         DDP compatible compression-aware collate function
         """
-        # FIXED: Static filter for compression quality for DDP
+
         valid_batch = []
         
         for audio in batch:
@@ -1100,20 +1096,20 @@ class DDPCompatibleCollator:
                 if not self._is_compression_friendly(audio):
                     continue
             
-            # FIXED: Static length validation for DDP
+
             if audio.shape[1] >= self.min_length:
                 valid_batch.append(audio)
             else:
-                # FIXED: Static pad to minimum length for DDP
+
                 audio_padded = self._safe_pad_compression_aware(audio, self.min_length)
                 valid_batch.append(audio_padded)
         
         if not valid_batch:
-            # FIXED: Static create compression-friendly dummy batch for DDP
+
             dummy_length = self.max_length or 44100  # Fixed default
             dummy_audio = torch.randn(len(batch), 2, dummy_length) * 0.02
             
-            # FIXED: Static add harmonic content for DDP
+
             t = torch.linspace(0, 1, dummy_length)
             harmonic = 0.05 * torch.sin(2 * torch.pi * 440 * t)  # Fixed frequency
             dummy_audio[:, 0] += harmonic
@@ -1121,38 +1117,38 @@ class DDPCompatibleCollator:
             
             return dummy_audio
         
-        # FIXED: Static compression-aware length determination for DDP
+
         lengths = [audio.shape[1] for audio in valid_batch]
         
         if self.compression_aware_batching:
-            # FIXED: Static choose compression-friendly length for DDP
+
             target_candidates = []
             for length in lengths:
-                # FIXED: Static round to compression-friendly sizes for DDP
+
                 friendly_length = ((length - 1) // 1024 + 1) * 1024  # Fixed 1024 blocks
                 target_candidates.append(friendly_length)
             
-            # FIXED: Static use median for DDP
+
             target_length = sorted(target_candidates)[len(target_candidates) // 2]
         else:
             target_length = max(lengths)
         
-        # FIXED: Static apply max length limit for DDP
+
         if self.max_length is not None:
             target_length = min(target_length, self.max_length)
         
-        # FIXED: Static ensure multiple alignment for DDP
+
         if self.pad_to_multiple > 1:
             target_length = ((target_length - 1) // self.pad_to_multiple + 1) * self.pad_to_multiple
         
-        # FIXED: Static apply compression-aware padding for DDP
+
         padded_batch = []
         for audio in valid_batch:
             try:
                 padded_audio = self._safe_pad_compression_aware(audio, target_length)
                 padded_batch.append(padded_audio)
             except Exception:
-                # FIXED: Static fallback padding for DDP
+
                 if audio.shape[1] > target_length:
                     padded_audio = audio[:, :target_length]
                 else:
@@ -1160,7 +1156,7 @@ class DDPCompatibleCollator:
                     padded_audio = torch.nn.functional.pad(audio, (0, pad_length))
                 padded_batch.append(padded_audio)
         
-        # FIXED: Static stack into batch for DDP
+
         try:
             batched_audio = torch.stack(padded_batch, dim=0)
         except Exception:
@@ -1212,7 +1208,7 @@ def create_s6_ssm_compression_datasets(
     safe_print(f"🔧 DDP Compatible: ✅ Enabled")
     safe_print(f"💾 V100 Optimized: ✅ Enabled")
     
-    # FIXED: Static create DDP dataset for compatibility
+
     duplicate_args = ['augmentation', 'cache_audio', 'skip_corrupted', 'min_duration', 
                      'use_cached_list', 'train_split']
     for arg in duplicate_args:
@@ -1238,18 +1234,18 @@ def create_s6_ssm_compression_datasets(
         **kwargs
     )
     
-    # FIXED: Static dataset splitting for DDP
+
     total_size = len(full_dataset)
     if total_size == 0:
         raise ValueError("No valid audio files found for DDP S6-SSM compression")
     
-    # FIXED: Static use train_split for DDP
+
     actual_train_ratio = train_split if train_split != 0.82 else train_ratio
     train_size = int(total_size * actual_train_ratio)
     val_size = int(total_size * val_ratio)
     test_size = total_size - train_size - val_size
     
-    # FIXED: Static random split for DDP
+
     indices = list(range(total_size))
     random.shuffle(indices)
     
@@ -1257,17 +1253,17 @@ def create_s6_ssm_compression_datasets(
     val_indices = indices[train_size:train_size + val_size]
     test_indices = indices[train_size + val_size:]
     
-    # FIXED: Static create subsets for DDP
+
     from torch.utils.data import Subset
     
     train_dataset = Subset(full_dataset, train_indices)
     val_dataset = Subset(full_dataset, val_indices)
     test_dataset = Subset(full_dataset, test_indices)
     
-    # FIXED: Static enable augmentation for training for DDP
+
     full_dataset.augmentation = True
     
-    # FIXED: Static print statistics for DDP
+
     compression_stats = full_dataset.get_compression_stats()
     
     mode_suffix = " (DDP FAST)" if fast_mode else " (DDP PARALLEL)"
@@ -1292,12 +1288,11 @@ def create_s6_ssm_compression_datasets(
     return train_dataset, val_dataset, test_dataset
 
 
-# ==================== Backward Compatibility Aliases ====================
 
-# FIXED: Static aliases for DDP compatibility
+
 DCAEDataset = DDPCompatibleS6SSMDataset
 DCAECollator = DDPCompatibleCollator
 
-# FIXED: Static alternative aliases for DDP compatibility
+
 DCAE_Dataset = DDPCompatibleS6SSMDataset
 DCAE_Collator = DDPCompatibleCollator
