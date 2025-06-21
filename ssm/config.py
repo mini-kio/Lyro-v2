@@ -1,683 +1,586 @@
-# lyro/ssm/config.py
+# lyro/ssm/config.py - Simplified Large S6 Model Configuration
 """
-S6-Optimized SSM + U-Net Configuration
-Enhanced configuration for S6 (Mamba-2) State Space Models
+S6-Enhanced Model Configuration - Large Model Only
+Focus: Flow Matching integration, numerical stability, FP16 enforcement
 """
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any
-import math
+import torch
+import os
 
-
-@dataclass
-class S6SSMConfig:
-    """S6 + U-Net 모델 설정 (Mamba-2 최적화)"""
-    
-    # 오디오 설정
-    sample_rate: int = 44100
-    n_fft: int = 2048
-    win_length: int = 2048
-    hop_length: int = 512
-    n_mels: int = 128
-    f_min: int = 40
-    f_max: int = 16000
-    
-    # S6 모델 아키텍처
-    input_channels: int = 8
-    hidden_dims: List[int] = field(default_factory=lambda: [128, 256, 384, 512])
-    s6_layers: List[int] = field(default_factory=lambda: [2, 3, 4, 4])
-    max_seq_len: int = 8192  # S6는 더 긴 시퀀스 처리 가능
-    
-    # S6 State Space 설정
-    d_state: int = 128  # S6에서 증가된 상태 차원
-    d_head: int = 64    # S6 헤드 차원
-    d_conv: int = 4
-    headdim: int = 64
-    ngroups: int = 1
-    expand: int = 2
-    
-    # S6 특화 파라미터
-    chunk_size: int = 256              # S6 청킹 크기
-    use_mem_eff_path: bool = True      # 메모리 효율적 경로 사용
-    A_init_range: Tuple[float, float] = (1, 16)  # S6 A 행렬 초기화 범위
-    dt_min: float = 0.001
-    dt_max: float = 0.1
-    dt_init_floor: float = 1e-4
-    
-    # S6 최적화 설정
-    use_chunked_processing: bool = True    # 청킹 프로세싱 활성화
-    adaptive_chunking: bool = True         # 적응적 청킹
-    chunk_overlap: int = 16               # 청크 오버랩
-    enable_s6_optimizations: bool = True   # S6 최적화 활성화
-    
-    # 조건 임베딩
-    task_embedding_dim: int = 512
-    time_embedding_dim: int = 512
-    lyrics_embedding_dim: int = 1024
-    style_embedding_dim: int = 512
-    
-    # S6 Flow Matching 설정
-    flow_steps: int = 10
-    flow_sigma: float = 1e-4
-    scheduler_type: str = 's6_cosine'      # S6 최적화된 스케줄러
-    solver_type: str = 's6_heun'           # S6 최적화된 솔버
-    integration_method: str = 's6_heun'    # 역호환성
-    
-    # S6 품질별 설정
-    quality_configs: Dict[str, Dict] = field(default_factory=lambda: {
-        's6_fast': {
-            'flow_steps': 6,
-            'solver_type': 's6_euler',
-            'chunk_size': 128,
-            'cfg_scale': 1.2
-        },
-        's6_standard': {
-            'flow_steps': 10,
-            'solver_type': 's6_heun',
-            'chunk_size': 256,
-            'cfg_scale': 1.5
-        },
-        's6_premium': {
-            'flow_steps': 16,
-            'solver_type': 's6_adaptive',
-            'chunk_size': 512,
-            'cfg_scale': 2.0
-        }
-    })
-    
-    # S6 학습 설정
-    learning_rate: float = 4e-4  # S6에 최적화된 학습률
-    min_lr: float = 1e-6
-    weight_decay: float = 0.01
-    grad_clip: float = 1.0
-    warmup_steps: int = 1000
-    
-    # S6 데이터 설정
-    batch_size: int = 4  # S6 메모리 효율성으로 더 큰 배치 가능
-    num_workers: int = 6  # S6 처리 속도로 더 많은 워커 허용
-    epochs: int = 150
-    
-    # S6 Stage별 설정
-    stage_configs: Dict[str, Dict] = field(default_factory=lambda: {
-        'B': {
-            'learning_rate': 8e-4,  # S6 최적화된 학습률
-            'task_ratios': {'SONG': 1.0, 'INST': 0.0, 'COVER': 0.0},
-            'epochs': 50,
-            'chunk_size': 256,
-            'flow_steps': 8
-        },
-        'C': {
-            'learning_rate': 6e-4,
-            'task_ratios': {'SONG': 0.7, 'INST': 0.3, 'COVER': 0.0},
-            'epochs': 50,
-            'chunk_size': 256,
-            'flow_steps': 10
-        },
-        'D': {
-            'learning_rate': 4e-4,
-            'task_ratios': {'SONG': 0.5, 'INST': 0.2, 'COVER': 0.3},
-            'epochs': 50,
-            'icl_max_length': 240,  # S6로 더 긴 컨텍스트 처리
-            'chunk_size': 384,
-            'flow_steps': 12
-        },
-        'E': {
-            'learning_rate': 2e-4,
-            'task_ratios': {'SONG': 0.6, 'INST': 0.15, 'COVER': 0.25},
-            'epochs': 20,
-            'quality_threshold': 0.85,  # S6로 더 높은 품질 기준
-            'chunk_size': 512,
-            'flow_steps': 16
-        }
-    })
-    
-    # S6 Multitask 설정
-    adaptive_weights: bool = True
-    grad_norm_threshold: float = 1.0
-    weight_update_interval: int = 100
-    s6_task_balancing: bool = True  # S6 특화 태스크 밸런싱
-    
-    # S6 ICL 설정
-    icl_max_ref_length: float = 240.0  # S6로 더 긴 참조 처리 가능
-    icl_style_extraction: str = 's6_hierarchical'  # S6 특화 추출
-    icl_dual_track: bool = True
-    icl_progressive_context: bool = True
-    icl_chunk_processing: bool = True  # S6 청킹으로 긴 참조 처리
-    
-    # S6 데이터 설정
-    max_audio_length: int = 441000  # 10초 (S6로 더 긴 시퀀스 처리)
-    max_text_length: int = 768      # S6로 더 긴 텍스트 처리
-    
-    # S6 메모리 최적화
-    memory_efficient: bool = True
-    gradient_checkpointing: bool = True
-    mixed_precision: bool = True
-    torch_compile: bool = True
-    compile_mode: str = 'default'
-    
-    # S6 성능 모니터링
-    track_s6_metrics: bool = True
-    log_chunk_efficiency: bool = True
-    monitor_memory_usage: bool = True
-    benchmark_interval: int = 100
-
-
-@dataclass
-class S6InferenceConfig:
-    """S6 추론 설정"""
-    
-    # 기본 설정
-    device: str = 'cuda'
-    dtype: str = 'float16'
-    
-    # S6 생성 설정
-    default_duration: float = 30.0
-    max_duration: float = 600.0  # S6로 더 긴 생성 가능
-    
-    # S6 Flow 설정
-    default_flow_steps: int = 10
-    default_guidance_scale: float = 1.5
-    scheduler_type: str = 's6_cosine'
-    solver_type: str = 's6_heun'
-    
-    # S6 청킹 설정
-    chunk_size: int = 256
-    enable_chunked_generation: bool = True
-    chunk_overlap: int = 16
-    adaptive_chunking: bool = True
-    
-    # S6 EOS 설정
-    use_early_stopping: bool = True
-    eos_penalty: float = 0.1
-    min_generation_length: int = 100
-    s6_sequence_termination: bool = True  # S6 특화 시퀀스 종료
-    
-    # S6 서버 설정
-    server_host: str = '0.0.0.0'
-    server_port: int = 8000
-    max_concurrent_requests: int = 12  # S6 효율성으로 더 많은 동시 요청
-    request_timeout: int = 300
-    
-    # S6 캐시 설정
-    enable_cache: bool = True
-    cache_size: int = 150  # S6 메모리 효율성으로 더 큰 캐시
-    cache_ttl: int = 3600
-    chunk_cache_enabled: bool = True  # S6 청크 캐시
-    
-    # S6 최적화 설정
-    use_torch_compile: bool = True
-    compile_mode: str = 'default'
-    memory_optimization: bool = True
-    batch_generation: bool = True  # S6 배치 생성 지원
-
-
-@dataclass 
-class S6TrainingConfig:
-    """S6 학습 전용 설정"""
-    
-    # S6 옵티마이저 설정
-    optimizer: str = "adamw"
-    learning_rate: float = 4e-4  # S6 최적화
-    betas: Tuple[float, float] = (0.9, 0.95)  # S6에 더 적합
-    weight_decay: float = 0.01
-    eps: float = 1e-8
-    fused: bool = True  # Fused AdamW for S6
-    
-    # S6 스케줄러 설정
-    scheduler: str = "cosine_warmup"
-    min_lr: float = 1e-6
-    warmup_epochs: int = 10
-    warmup_ratio: float = 0.1
-    cosine_restarts: bool = True  # S6에 효과적
-    T_0: int = 25  # Restart period
-    T_mult: int = 1
-    
-    # S6 학습 동역학
-    gradient_accumulation_steps: int = 2
-    max_grad_norm: float = 1.0
-    mixed_precision: str = "fp16"
-    torch_compile: bool = True
-    compile_mode: str = "default"
-    
-    # S6 데이터 로딩
-    batch_size: int = 4
-    num_workers: int = 6  # S6 효율성으로 증가
-    pin_memory: bool = True
-    persistent_workers: bool = True
-    prefetch_factor: int = 3  # S6 청킹에 최적화
-    
-    # S6 검증 설정
-    val_check_interval: int = 2
-    val_batches_limit: int = 20  # S6 효율성으로 증가
-    val_chunk_processing: bool = True
-    
-    # S6 체크포인팅
-    save_every_n_epochs: int = 5
-    keep_last_n_checkpoints: int = 3
-    save_best_only: bool = False
-    save_s6_metrics: bool = True
-    
-    # S6 로깅
-    log_every_n_steps: int = 100
-    sample_every_n_epochs: int = 10
-    num_samples: int = 6  # S6로 더 많은 샘플 생성
-    log_s6_performance: bool = True
-    
-    # S6 Early stopping
-    patience: int = 25  # S6 안정성으로 증가
-    min_delta: float = 1e-4
-    monitor_s6_efficiency: bool = True
-    
-    # S6 특화 학습 설정
-    s6_loss_start_epoch: int = 0
-    chunk_boundary_smoothing: bool = True
-    adaptive_chunk_sizing: bool = True
-    progressive_sequence_training: bool = False
-
-
-@dataclass
-class S6DataConfig:
-    """S6 데이터 설정"""
-    
-    # 경로 설정
-    dataset_root: str = "dataset-dcae/datasets/raw"
-    cache_dir: Optional[str] = None
-    
-    # S6 오디오 처리
-    sample_rate: int = 44100
-    audio_duration: float = 10.0  # S6로 더 긴 처리 가능
-    min_duration: float = 1.0
-    max_duration: float = 60.0    # S6로 대폭 증가
-    
-    # S6 시퀀스 처리
-    max_sequence_length: int = 8192  # S6 긴 시퀀스 지원
-    chunk_size: int = 256
-    chunk_overlap: int = 16
-    adaptive_chunking: bool = True
-    
-    # 데이터 분할
-    train_split: float = 0.85
-    val_split: float = 0.15
-    test_split: float = 0.0
-    
-    # S6 증강 설정
-    use_augmentation: bool = True
-    augmentation_prob: float = 0.8
-    s6_temporal_augmentation: bool = True  # S6 특화 시간 증강
-    preserve_chunk_boundaries: bool = True
-    
-    # 파일 처리
-    supported_formats: List[str] = field(default_factory=lambda: ['.wav', '.flac', '.mp3', '.m4a', '.ogg'])
-    skip_corrupted: bool = True
-    normalize_audio: bool = True
-    
-    # S6 메모리 관리
-    cache_audio: bool = False  # S6 청킹으로 캐시 불필요
-    preload_data: bool = False
-    streaming_processing: bool = True  # S6 스트리밍 처리
-    
-    # S6 품질 필터
-    min_sample_rate: int = 22050
-    max_file_size_mb: int = 200  # S6로 더 큰 파일 처리
-    remove_silence: bool = False
-    min_audio_quality: float = 0.7  # S6 품질 기준
-    
-    # S6 배치 처리
-    dynamic_batching: bool = True  # S6 동적 배칭
-    sort_by_length: bool = True    # S6 효율성을 위한 길이별 정렬
-    drop_last: bool = True
+# Disable torch compile globally
+import torch._dynamo
+torch._dynamo.config.disable = True
+torch._dynamo.config.suppress_errors = True
+os.environ['TORCH_COMPILE_DISABLE'] = '1'
+os.environ['TORCHDYNAMO_DISABLE'] = '1'
 
 
 @dataclass
 class S6ModelConfig:
-    """S6 모델별 상세 설정"""
+    """Simplified S6 Model Configuration for Large Model (16 input channels)"""
     
-    # 모델 크기별 설정
-    model_size: str = "base"  # "small", "base", "large", "xl"
+    # ==================== Model Architecture ====================
+    # Fixed for large model compatibility with DCAE
+    input_channels: int = 16  # Large DCAE latent channels
     
-    # S6 아키텍처 설정
-    model_configs: Dict[str, Dict] = field(default_factory=lambda: {
-        "small": {
-            "hidden_dims": [96, 192, 288, 384],
-            "s6_layers": [2, 2, 3, 3],
-            "d_state": 64,
-            "d_head": 32,
-            "chunk_size": 128,
-            "max_seq_len": 4096
+    # S6 U-Net architecture
+    hidden_dims: List[int] = field(default_factory=lambda: [256, 512, 768])
+    s6_layers: List[int] = field(default_factory=lambda: [3, 4, 4])
+    d_state: int = 64
+    max_seq_len: int = 2048
+    
+    # S6 State Space parameters
+    d_head: int = 64
+    d_conv: int = 4
+    expand: int = 2
+    
+    # ==================== Conditioning Settings ====================
+    # Task and conditional embedding
+    task_embedding_dim: int = 256
+    time_embedding_dim: int = 256
+    style_embedding_dim: int = 512
+    
+    # Text conditioning
+    max_text_length: int = 512
+    text_embedding_dim: int = 256
+    
+    # ==================== Training Settings ====================
+    # Optimizer
+    learning_rate: float = 8e-5  # Conservative for large model
+    weight_decay: float = 0.01
+    betas: Tuple[float, float] = (0.9, 0.95)
+    eps: float = 1e-8
+    
+    # Training dynamics
+    batch_size: int = 2  # Small for large model
+    epochs: int = 100
+    grad_clip: float = 1.0
+    
+    # Scheduler
+    min_lr: float = 1e-6
+    warmup_steps: int = 1000
+    
+    # ==================== Stability Settings ====================
+    # Critical for large model stability
+    disable_torch_compile: bool = True
+    disable_dynamo_tracing: bool = True
+    enable_numerical_stability: bool = True
+    gradient_checkpointing: bool = False  # Disabled to prevent NaN
+    
+    # Mixed precision
+    mixed_precision: str = "fp16"
+    force_fp16: bool = True
+    
+    # ==================== Data Settings ====================
+    # Audio processing
+    sample_rate: int = 44100
+    max_audio_length: int = 441000  # 10 seconds
+    
+    # Data loading (DDP safe)
+    num_workers: int = 0
+    pin_memory: bool = False
+    persistent_workers: bool = False
+    
+    # ==================== Checkpoint Settings ====================
+    save_interval: int = 10
+    keep_last_n: int = 3
+    save_best_only: bool = True
+    
+    # ==================== Logging Settings ====================
+    log_interval: int = 50
+    sample_interval: int = 20
+    val_check_interval: int = 5
+    
+    def validate(self) -> Dict[str, Any]:
+        """Validate S6 model configuration"""
+        issues = []
+        warnings = []
+        
+        # Model architecture validation
+        if self.input_channels != 16:
+            issues.append(f"Large model requires 16 input channels, got {self.input_channels}")
+        
+        if len(self.hidden_dims) != len(self.s6_layers):
+            issues.append("hidden_dims and s6_layers must have same length")
+        
+        # Memory validation
+        estimated_memory = self._estimate_memory_usage()
+        if estimated_memory > 22:  # 22GB limit for V100
+            warnings.append(f"Estimated memory {estimated_memory:.1f}GB may exceed V100 capacity")
+        
+        # Training stability validation
+        if self.learning_rate > 1e-4:
+            warnings.append(f"High learning rate {self.learning_rate} may cause instability")
+        
+        if self.batch_size > 4:
+            warnings.append(f"Large batch size {self.batch_size} may cause OOM")
+        
+        if not self.disable_torch_compile:
+            issues.append("torch.compile must be disabled for DDP compatibility")
+        
+        if self.gradient_checkpointing:
+            warnings.append("Gradient checkpointing may cause NaN issues")
+        
+        return {
+            'valid': len(issues) == 0,
+            'issues': issues,
+            'warnings': warnings,
+            'estimated_memory_gb': estimated_memory,
+            'estimated_parameters': self._estimate_parameters()
+        }
+    
+    def _estimate_memory_usage(self) -> float:
+        """Estimate GPU memory usage for large S6 model"""
+        # Model memory (large S6 U-Net)
+        model_memory = 3.5  # ~3.5GB for large S6 model
+        
+        # Batch memory (per sample)
+        sequence_length = self.max_seq_len
+        hidden_dim = max(self.hidden_dims)
+        batch_memory = self.batch_size * sequence_length * hidden_dim * 4 / (1024**3)  # FP32 bytes to GB
+        
+        # Flow matching overhead
+        flow_memory = 1.0
+        
+        # System overhead
+        overhead = 1.5
+        
+        return model_memory + batch_memory + flow_memory + overhead
+    
+    def _estimate_parameters(self) -> int:
+        """Estimate S6 model parameters"""
+        # S6 U-Net parameters estimation
+        base_params = 30_000_000  # Base U-Net parameters
+        
+        # S6 layers parameters
+        s6_params = 0
+        for i, (hidden_dim, num_layers) in enumerate(zip(self.hidden_dims, self.s6_layers)):
+            layer_params = hidden_dim * self.d_state * 4 * num_layers  # Rough estimation
+            s6_params += layer_params
+        
+        # Conditional embedding parameters
+        conditioning_params = (
+            self.task_embedding_dim * 16 +  # Task embeddings
+            self.time_embedding_dim * 2 +   # Time embeddings
+            self.style_embedding_dim * 2    # Style embeddings
+        )
+        
+        return base_params + s6_params + conditioning_params
+    
+    def get_model_config(self) -> Dict[str, Any]:
+        """Get core model configuration"""
+        return {
+            'input_channels': self.input_channels,
+            'hidden_dims': self.hidden_dims,
+            's6_layers': self.s6_layers,
+            'd_state': self.d_state,
+            'max_seq_len': self.max_seq_len,
+            'force_fp16': True,
+        }
+    
+    def get_training_config(self) -> Dict[str, Any]:
+        """Get training configuration"""
+        return {
+            'learning_rate': self.learning_rate,
+            'weight_decay': self.weight_decay,
+            'batch_size': self.batch_size,
+            'epochs': self.epochs,
+            'grad_clip': self.grad_clip,
+            'mixed_precision': self.mixed_precision,
+            'disable_torch_compile': self.disable_torch_compile,
+        }
+
+
+@dataclass
+class FlowMatchingConfig:
+    """Simplified Flow Matching Configuration for Large S6 Model"""
+    
+    # ==================== Flow Matching Core Settings ====================
+    # Flow configuration
+    flow_type: str = "rectified"  # "rectified" or "standard"
+    scheduler_type: str = "cosine"  # "linear" or "cosine"
+    solver_type: str = "heun"  # "euler" or "heun"
+    sigma: float = 1e-4
+    
+    # Generation settings
+    flow_steps: int = 10
+    cfg_scale: float = 1.5
+    use_cfg: bool = True
+    
+    # ==================== Quality Presets ====================
+    quality_presets: Dict[str, Dict] = field(default_factory=lambda: {
+        'fast': {
+            'flow_steps': 6,
+            'solver_type': 'euler',
+            'cfg_scale': 1.2,
         },
-        "base": {
-            "hidden_dims": [128, 256, 384, 512],
-            "s6_layers": [2, 3, 4, 4],
-            "d_state": 128,
-            "d_head": 64,
-            "chunk_size": 256,
-            "max_seq_len": 8192
+        'standard': {
+            'flow_steps': 10,
+            'solver_type': 'heun',
+            'cfg_scale': 1.5,
         },
-        "large": {
-            "hidden_dims": [256, 512, 768, 1024],
-            "s6_layers": [3, 4, 6, 6],
-            "d_state": 256,
-            "d_head": 128,
-            "chunk_size": 512,
-            "max_seq_len": 16384
-        },
-        "xl": {  # S6로 추가 가능한 대형 모델
-            "hidden_dims": [384, 768, 1152, 1536],
-            "s6_layers": [4, 6, 8, 8],
-            "d_state": 384,
-            "d_head": 192,
-            "chunk_size": 768,
-            "max_seq_len": 32768
+        'high': {
+            'flow_steps': 16,
+            'solver_type': 'heun',
+            'cfg_scale': 2.0,
         }
     })
     
-    # S6 초기화 설정
-    init_method: str = "xavier_uniform"
-    init_gain: float = 1.0
-    bias_init: float = 0.0
+    # ==================== Training Settings ====================
+    # Loss settings
+    flow_matching_weight: float = 1.0
     
-    # S6 정규화 설정
-    use_layer_norm: bool = True
-    use_group_norm: bool = True
-    norm_eps: float = 1e-5
+    # ==================== Stability Settings ====================
+    enable_numerical_stability: bool = True
+    clamp_values: bool = True
+    max_velocity_norm: float = 10.0
     
-    # S6 드롭아웃 설정
-    dropout: float = 0.1
-    attention_dropout: float = 0.1
-    path_dropout: float = 0.0  # Stochastic depth
+    def apply_preset(self, preset: str):
+        """Apply quality preset"""
+        if preset in self.quality_presets:
+            for key, value in self.quality_presets[preset].items():
+                if hasattr(self, key):
+                    setattr(self, key, value)
+        else:
+            print(f"Warning: Unknown preset '{preset}'")
     
-    # S6 활성화 함수
-    activation: str = "silu"  # S6에 최적화된 활성화
-    
-    def get_model_config(self) -> Dict[str, Any]:
-        """현재 모델 크기에 대한 설정 반환"""
-        return self.model_configs.get(self.model_size, self.model_configs["base"])
-    
-    def update_for_model_size(self, target_config: dict):
-        """모델 크기에 따라 설정 업데이트"""
-        config = self.get_model_config()
-        for key, value in config.items():
-            if hasattr(target_config, key):
-                setattr(target_config, key, value)
+    def validate(self) -> Dict[str, Any]:
+        """Validate flow matching configuration"""
+        issues = []
+        warnings = []
+        
+        if self.flow_steps < 1:
+            issues.append("flow_steps must be >= 1")
+        
+        if self.flow_steps > 20:
+            warnings.append(f"High flow_steps ({self.flow_steps}) may be slow")
+        
+        if self.cfg_scale < 1.0:
+            warnings.append(f"CFG scale {self.cfg_scale} < 1.0 may reduce quality")
+        
+        if self.cfg_scale > 3.0:
+            warnings.append(f"High CFG scale {self.cfg_scale} may cause instability")
+        
+        return {
+            'valid': len(issues) == 0,
+            'issues': issues,
+            'warnings': warnings
+        }
 
 
+@dataclass
+class S6TrainingConfig:
+    """Simplified S6 Training Configuration"""
+    
+    # ==================== Paths ====================
+    train_metadata: str = "dataset/metadata/train_metadata.jsonl"
+    val_metadata: str = "dataset/metadata/val_metadata.jsonl"
+    dataset_root: str = "dataset/"
+    checkpoint_dir: str = "ssm/checkpoints_large_s6"
+    
+    # ==================== Model Checkpoints ====================
+    dcae_checkpoint: str = ""  # Required: path to DCAE checkpoint
+    resume: Optional[str] = None
+    
+    # ==================== Training Control ====================
+    use_wandb: bool = False
+    save_samples: bool = True
+    
+    # ==================== Hardware ====================
+    device: str = "cuda"
+    
+    def __post_init__(self):
+        """Post-initialization validation"""
+        if not self.dcae_checkpoint:
+            print("Warning: dcae_checkpoint path is required")
+        
+        if not torch.cuda.is_available() and self.device == "cuda":
+            print("Warning: CUDA not available, falling back to CPU")
+            self.device = "cpu"
 
-def create_s6_ssm_config(
-    model_size: str = "base",
-    stage: str = "B",
-    audio_duration: float = 10.0,
-    batch_size: int = 4,
-    chunk_size: int = None,
-    enable_s6_optimizations: bool = True,
+
+@dataclass
+class TaskConfig:
+    """Task-specific configuration for music generation"""
+    
+    # ==================== Task Settings ====================
+    # Task ratios for training
+    task_ratios: Dict[str, float] = field(default_factory=lambda: {
+        'SONG': 0.6,
+        'INST': 0.2, 
+        'COVER': 0.2
+    })
+    
+    # ==================== Generation Settings ====================
+    # Default generation parameters
+    default_duration: float = 10.0  # seconds
+    max_duration: float = 30.0
+    
+    # Task-specific settings
+    song_settings: Dict[str, Any] = field(default_factory=lambda: {
+        'require_lyrics': True,
+        'default_style': 'pop',
+        'cfg_scale': 1.5
+    })
+    
+    instrumental_settings: Dict[str, Any] = field(default_factory=lambda: {
+        'require_lyrics': False,
+        'default_style': 'instrumental',
+        'cfg_scale': 1.2
+    })
+    
+    cover_settings: Dict[str, Any] = field(default_factory=lambda: {
+        'require_reference': True,
+        'style_transfer_strength': 0.7,
+        'cfg_scale': 1.8
+    })
+    
+    def validate_task_ratios(self) -> bool:
+        """Validate that task ratios sum to 1.0"""
+        total = sum(self.task_ratios.values())
+        if abs(total - 1.0) > 1e-6:
+            print(f"Warning: Task ratios sum to {total}, should be 1.0")
+            return False
+        return True
+
+
+# ==================== Factory Functions ====================
+
+def create_large_s6_config(
+    input_channels: int = 16,
+    batch_size: int = 2,
+    learning_rate: float = 8e-5,
+    flow_steps: int = 10,
     **kwargs
-) -> S6SSMConfig:
+) -> Tuple[S6ModelConfig, FlowMatchingConfig]:
     """
-    완전한 S6-SSM 설정 생성
+    Create configuration for Large S6 model with Flow Matching
     
     Args:
-        model_size: "small", "base", "large", "xl"
-        stage: 학습 단계 "B", "C", "D", "E"
-        audio_duration: 오디오 길이 (초)
-        batch_size: 배치 크기
-        chunk_size: S6 청크 크기 (None이면 자동 설정)
-        enable_s6_optimizations: S6 최적화 활성화
-        **kwargs: 추가 설정 오버라이드
+        input_channels: Input channels (must be 16 for large DCAE)
+        batch_size: Training batch size
+        learning_rate: Learning rate
+        flow_steps: Flow matching steps
+        **kwargs: Additional config overrides
     
     Returns:
-        완전한 S6SSMConfig 인스턴스
+        Tuple of (S6ModelConfig, FlowMatchingConfig)
     """
-    config = S6SSMConfig()
+    # Model config
+    model_config = S6ModelConfig(
+        input_channels=input_channels,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+    )
     
-    # 기본 파라미터 설정
-    config.audio_duration = audio_duration
-    config.batch_size = batch_size
-    config.enable_s6_optimizations = enable_s6_optimizations
+    # Flow config
+    flow_config = FlowMatchingConfig(
+        flow_steps=flow_steps,
+    )
     
-    # 모델 크기별 설정 적용
-    model_config = S6ModelConfig()
-    model_config.model_size = model_size
-    model_config.update_for_model_size(config)
-    
-    # 청크 크기 자동 설정
-    if chunk_size is None:
-        size_to_chunk = {"small": 128, "base": 256, "large": 512, "xl": 768}
-        config.chunk_size = size_to_chunk.get(model_size, 256)
-    else:
-        config.chunk_size = chunk_size
-    
-    # 스테이지별 설정 적용
-    if stage in config.stage_configs:
-        stage_config = config.stage_configs[stage]
-        for key, value in stage_config.items():
-            if hasattr(config, key):
-                setattr(config, key, value)
-    
-    # 추가 오버라이드 적용
+    # Apply overrides
     for key, value in kwargs.items():
-        if hasattr(config, key):
-            setattr(config, key, value)
+        if hasattr(model_config, key):
+            setattr(model_config, key, value)
+        elif hasattr(flow_config, key):
+            setattr(flow_config, key, value)
         else:
-            print(f"Warning: Unknown S6 configuration parameter: {key}")
+            print(f"Warning: Unknown config parameter: {key}")
     
-    return config
+    # Validate configurations
+    model_validation = model_config.validate()
+    flow_validation = flow_config.validate()
+    
+    # Check for issues
+    all_issues = model_validation['issues'] + flow_validation['issues']
+    if all_issues:
+        print("❌ Configuration validation failed:")
+        for issue in all_issues:
+            print(f"   - {issue}")
+        raise ValueError("Configuration validation failed")
+    
+    # Report warnings
+    all_warnings = model_validation['warnings'] + flow_validation['warnings']
+    if all_warnings:
+        print("⚠️ Configuration warnings:")
+        for warning in all_warnings:
+            print(f"   - {warning}")
+    
+    print(f"✅ Large S6 Config Created:")
+    print(f"   - Parameters: ~{model_validation['estimated_parameters']:,}")
+    print(f"   - Memory: ~{model_validation['estimated_memory_gb']:.1f}GB")
+    print(f"   - Input Channels: {input_channels}")
+    print(f"   - Flow Steps: {flow_steps}")
+    
+    return model_config, flow_config
 
 
-def get_s6_high_quality_config() -> S6SSMConfig:
-    """S6 고품질 음악 처리 설정"""
-    return create_s6_ssm_config(
-        model_size="large",
-        stage="E",
-        audio_duration=20.0,
-        batch_size=2,  # 대형 모델이므로 작은 배치
-        chunk_size=512,
-        flow_steps=16,
-        d_state=256,
-        max_seq_len=16384,
-        enable_s6_optimizations=True,
-        adaptive_chunking=True,
-        use_mem_eff_path=True
+def create_stable_s6_config(**kwargs) -> Tuple[S6ModelConfig, FlowMatchingConfig]:
+    """Create maximally stable S6 configuration"""
+    return create_large_s6_config(
+        batch_size=1,  # Very conservative
+        learning_rate=5e-5,  # Lower learning rate
+        grad_clip=0.5,  # Conservative gradient clipping
+        flow_steps=8,  # Fewer steps for stability
+        cfg_scale=1.2,  # Lower CFG scale
+        **kwargs
     )
 
 
-def get_s6_efficient_config() -> S6SSMConfig:
-    """S6 효율적 학습/추론 설정"""
-    return create_s6_ssm_config(
-        model_size="small",
-        stage="B",
-        audio_duration=8.0,
-        batch_size=8,  # 작은 모델이므로 큰 배치
-        chunk_size=128,
-        flow_steps=6,
-        d_state=64,
-        max_seq_len=4096,
-        enable_s6_optimizations=True,
-        adaptive_chunking=False,  # 효율성을 위해 고정 청킹
-        scheduler_type='s6_linear'
+def create_fast_s6_config(**kwargs) -> Tuple[S6ModelConfig, FlowMatchingConfig]:
+    """Create fast training S6 configuration"""
+    return create_large_s6_config(
+        batch_size=4,  # Larger batch if memory allows
+        learning_rate=1e-4,  # Higher learning rate
+        flow_steps=6,  # Fewer steps for speed
+        solver_type='euler',  # Faster solver
+        **kwargs
     )
 
 
-def get_s6_research_config() -> S6SSMConfig:
-    """S6 연구 및 실험 설정"""
-    return create_s6_ssm_config(
-        model_size="base",
-        stage="D",
-        audio_duration=15.0,
-        batch_size=4,
-        chunk_size=384,  # 실험을 위한 중간 크기
-        flow_steps=12,
-        d_state=128,
-        max_seq_len=12288,
-        enable_s6_optimizations=True,
-        adaptive_chunking=True,
-        track_s6_metrics=True,
-        log_chunk_efficiency=True,
-        save_s6_metrics=True
+def create_high_quality_s6_config(**kwargs) -> Tuple[S6ModelConfig, FlowMatchingConfig]:
+    """Create high quality S6 configuration"""
+    return create_large_s6_config(
+        learning_rate=6e-5,  # Lower for quality
+        flow_steps=16,  # More steps for quality
+        cfg_scale=2.0,  # Higher CFG scale
+        solver_type='heun',  # More accurate solver
+        **kwargs
     )
 
 
-def get_s6_xl_config() -> S6SSMConfig:
-    """S6 XL 모델 설정 (최고 품질)"""
-    return create_s6_ssm_config(
-        model_size="xl",
-        stage="E",
-        audio_duration=30.0,
-        batch_size=1,  # XL 모델이므로 매우 작은 배치
-        chunk_size=768,
-        flow_steps=20,
-        d_state=384,
-        max_seq_len=32768,
-        enable_s6_optimizations=True,
-        adaptive_chunking=True,
-        use_mem_eff_path=True,
-        gradient_checkpointing=True,
-        mixed_precision=True
-    )
+# ==================== Preset Classes ====================
 
-
-
-class S6PerformancePresets:
-    """S6 성능 프리셋 관리"""
+class S6Presets:
+    """Predefined S6 configuration presets"""
     
     @staticmethod
-    def get_speed_optimized() -> Dict[str, Any]:
-        """속도 최적화 S6 설정"""
-        return {
-            "model_size": "small",
-            "chunk_size": 128,
-            "flow_steps": 6,
-            "solver_type": "s6_euler",
-            "scheduler_type": "s6_linear",
-            "adaptive_chunking": False,
-            "mixed_precision": True,
-            "torch_compile": True,
-            "compile_mode": "max-autotune"
-        }
+    def development() -> Tuple[S6ModelConfig, FlowMatchingConfig]:
+        """Development preset - fast iteration"""
+        return create_large_s6_config(
+            batch_size=1,
+            epochs=50,
+            flow_steps=6,
+            save_interval=5,
+            sample_interval=10,
+        )
     
     @staticmethod
-    def get_memory_optimized() -> Dict[str, Any]:
-        """메모리 최적화 S6 설정"""
-        return {
-            "chunk_size": 64,
-            "gradient_checkpointing": True,
-            "memory_efficient": True,
-            "batch_size": 1,
-            "use_mem_eff_path": True,
-            "adaptive_chunking": True,
-            "streaming_processing": True
-        }
+    def production() -> Tuple[S6ModelConfig, FlowMatchingConfig]:
+        """Production preset - balanced quality/speed"""
+        return create_large_s6_config(
+            batch_size=2,
+            epochs=200,
+            flow_steps=10,
+            learning_rate=8e-5,
+        )
     
     @staticmethod
-    def get_quality_optimized() -> Dict[str, Any]:
-        """품질 최적화 S6 설정"""
-        return {
-            "model_size": "large",
-            "chunk_size": 512,
-            "flow_steps": 16,
-            "solver_type": "s6_adaptive",
-            "scheduler_type": "s6_advanced",
-            "cfg_scale": 2.0,
-            "d_state": 256,
-            "use_self_conditioning": True
-        }
-    
-    @staticmethod
-    def get_balanced() -> Dict[str, Any]:
-        """균형잡힌 S6 설정"""
-        return {
-            "model_size": "base",
-            "chunk_size": 256,
-            "flow_steps": 10,
-            "solver_type": "s6_heun",
-            "scheduler_type": "s6_cosine",
-            "cfg_scale": 1.5,
-            "adaptive_chunking": True,
-            "mixed_precision": True
-        }
+    def research() -> Tuple[S6ModelConfig, FlowMatchingConfig]:
+        """Research preset - comprehensive logging"""
+        return create_large_s6_config(
+            batch_size=2,
+            save_interval=5,
+            log_interval=25,
+            sample_interval=10,
+            flow_steps=12,
+        )
 
 
+# ==================== Unified Configuration ====================
 
-def validate_s6_config(config: S6SSMConfig) -> Tuple[bool, List[str]]:
-    """S6 설정 검증"""
-    errors = []
+@dataclass
+class LyroS6Config:
+    """Unified configuration for LYRO S6 system"""
     
-    # 기본 검증
-    if config.chunk_size <= 0:
-        errors.append("chunk_size must be positive")
+    model: S6ModelConfig
+    flow: FlowMatchingConfig
+    training: S6TrainingConfig
+    task: TaskConfig
     
-    if config.chunk_size > config.max_seq_len:
-        errors.append("chunk_size cannot be larger than max_seq_len")
-    
-    if config.d_state <= 0:
-        errors.append("d_state must be positive")
-    
-    if config.flow_steps <= 0:
-        errors.append("flow_steps must be positive")
-    
-    # S6 특화 검증
-    if config.enable_s6_optimizations:
-        if config.chunk_size < 64:
-            errors.append("S6 optimizations require chunk_size >= 64")
+    @classmethod
+    def create_large_model_config(
+        cls,
+        dcae_checkpoint: str,
+        preset: str = "production",
+        **kwargs
+    ) -> "LyroS6Config":
+        """
+        Create unified configuration for large S6 model
         
-        if config.max_seq_len < config.chunk_size * 2:
-            errors.append("S6 optimizations require max_seq_len >= chunk_size * 2")
+        Args:
+            dcae_checkpoint: Path to DCAE checkpoint
+            preset: Configuration preset ("development", "production", "research")
+            **kwargs: Additional overrides
+        """
+        # Get preset configurations
+        if preset == "development":
+            model_config, flow_config = S6Presets.development()
+        elif preset == "production":
+            model_config, flow_config = S6Presets.production()
+        elif preset == "research":
+            model_config, flow_config = S6Presets.research()
+        else:
+            model_config, flow_config = S6Presets.production()
+            print(f"Warning: Unknown preset '{preset}', using 'production'")
+        
+        # Training config
+        training_config = S6TrainingConfig(dcae_checkpoint=dcae_checkpoint)
+        
+        # Task config
+        task_config = TaskConfig()
+        
+        # Apply overrides
+        for key, value in kwargs.items():
+            if hasattr(model_config, key):
+                setattr(model_config, key, value)
+            elif hasattr(flow_config, key):
+                setattr(flow_config, key, value)
+            elif hasattr(training_config, key):
+                setattr(training_config, key, value)
+            elif hasattr(task_config, key):
+                setattr(task_config, key, value)
+            else:
+                print(f"Warning: Unknown config parameter: {key}")
+        
+        return cls(
+            model=model_config,
+            flow=flow_config,
+            training=training_config,
+            task=task_config
+        )
     
-    # 메모리 검증
-    estimated_memory = (
-        config.batch_size * 
-        config.max_seq_len * 
-        config.hidden_dims[-1] * 
-        4  # float32 bytes
-    ) / (1024**3)  # GB
-    
-    if estimated_memory > 24:  # 24GB limit
-        errors.append(f"Estimated memory usage ({estimated_memory:.1f}GB) exceeds 24GB limit")
-    
-    # 성능 검증
-    if config.chunk_size % 16 != 0:
-        errors.append("chunk_size should be multiple of 16 for optimal S6 performance")
-    
-    return len(errors) == 0, errors
+    def validate_full_config(self) -> Dict[str, Any]:
+        """Validate complete configuration"""
+        model_validation = self.model.validate()
+        flow_validation = self.flow.validate()
+        task_validation = {'valid': self.task.validate_task_ratios()}
+        
+        all_issues = (
+            model_validation['issues'] + 
+            flow_validation['issues'] +
+            ([] if task_validation['valid'] else ['Invalid task ratios'])
+        )
+        
+        all_warnings = model_validation['warnings'] + flow_validation['warnings']
+        
+        return {
+            'valid': len(all_issues) == 0,
+            'issues': all_issues,
+            'warnings': all_warnings,
+            'model_validation': model_validation,
+            'flow_validation': flow_validation,
+            'task_validation': task_validation
+        }
 
 
-def optimize_s6_config_for_hardware(
-    config: S6SSMConfig, 
-    gpu_memory_gb: float,
-    num_gpus: int = 1
-) -> S6SSMConfig:
-    """하드웨어에 맞게 S6 설정 최적화"""
-    
-    # 메모리 기반 배치 크기 조정
-    if gpu_memory_gb <= 8:
-        config.batch_size = 1
-        config.chunk_size = min(config.chunk_size, 128)
-        config.model_size = "small"
-    elif gpu_memory_gb <= 16:
-        config.batch_size = min(config.batch_size, 2)
-        config.chunk_size = min(config.chunk_size, 256)
-    elif gpu_memory_gb >= 24:
-        config.batch_size = min(config.batch_size * 2, 8)
-        config.chunk_size = min(config.chunk_size * 2, 512)
-    
-    # 멀티 GPU 최적화
-    if num_gpus > 1:
-        config.batch_size = config.batch_size * num_gpus
-        config.num_workers = config.num_workers * num_gpus
-    
-    # 메모리 최적화 설정
-    if gpu_memory_gb <= 12:
-        config.gradient_checkpointing = True
-        config.memory_efficient = True
-        config.use_mem_eff_path = True
-    
-    return config
-
-
-print("S6-optimized Configuration system ready!")
-print("Key S6 configuration features:")
-print("- S6 State Space Model parameters")
-print("- Chunk processing configurations") 
-print("- Memory optimization settings")
-print("- Performance presets for different use cases")
-print("- Hardware-specific optimization")
-print("- Stage-specific S6 configurations")
+print("✅ S6 Configuration - Large Model Simplified")
+print("Key features:")
+print("- Large S6 model focused (16 input channels)")
+print("- Flow Matching integration")
+print("- Numerical stability enforced")
+print("- DDP compatibility ensured")
 print("- Comprehensive validation system")
+print("- Unified configuration management")
