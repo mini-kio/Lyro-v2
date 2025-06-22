@@ -1,8 +1,7 @@
-# lyro/dcae/training_utils.py - FSDP/DDP Compatible Large Model Only - OPTIMIZED
+# lyro/dcae/training_utils.py - Optimized CNN Model Training Utilities
 """
-Training Utilities - Large Model Optimized + FSDP/DDP Compatible - CRITICAL OPTIMIZATIONS
-All parameters always used, no early returns, consistent gradient flow
-FIXES: Minimal safe operations, optimized EMA, reduced tensor conversions, improved metrics
+Training Utilities - Optimized for CNN-based DCAE Model
+Features: Simplified utilities, enhanced metrics, memory efficiency
 """
 
 import torch
@@ -23,65 +22,51 @@ torch._dynamo.config.disable = True
 os.environ['TORCH_COMPILE_DISABLE'] = '1'
 
 
-# ==================== CRITICAL FIX: Minimal Safe Operations ====================
-
-def minimal_safe_fix(tensor: torch.Tensor, name: str = "tensor") -> torch.Tensor:
-    """CRITICAL FIX: Minimal safe tensor fixing - no gradient-blocking operations"""
-    if tensor is None or tensor.numel() == 0:
-        return tensor
-    
-    # Only fix NaN/Inf, completely remove clamp operations
-    if torch.isnan(tensor).any() or torch.isinf(tensor).any():
-        mask = torch.isnan(tensor) | torch.isinf(tensor)
-        return torch.where(mask, torch.zeros_like(tensor), tensor)
-    
-    return tensor
-
+# ==================== Audio Utilities ====================
 
 def ensure_stereo_audio(audio: torch.Tensor, target_device: Optional[torch.device] = None) -> torch.Tensor:
     """
-    CRITICAL FIX: Minimal stereo audio conversion - reduced processing overhead
+    Ensure stereo audio format with minimal processing
     """
     if audio is None:
         device = target_device or torch.device('cpu')
-        return torch.zeros(1, 2, 44100, device=device, dtype=torch.float16)
+        return torch.zeros(1, 2, 44100, device=device, dtype=torch.float32)
     
-    # Minimal device alignment
+    # Device alignment
     if target_device is not None and audio.device != target_device:
         audio = audio.to(target_device)
     
-    # Streamlined stereo conversion
+    # Convert to stereo
     if audio.dim() == 1:
         audio = audio.unsqueeze(0).unsqueeze(0).repeat(1, 2, 1)
     elif audio.dim() == 2:
-        audio = audio.unsqueeze(1).repeat(1, 2, 1)
+        if audio.shape[0] == 1:
+            audio = audio.repeat(2, 1).unsqueeze(0)
+        elif audio.shape[0] == 2:
+            audio = audio.unsqueeze(0)
+        else:
+            audio = audio.unsqueeze(1).repeat(1, 2, 1)
     elif audio.dim() == 3:
         if audio.shape[1] == 1:
             audio = audio.repeat(1, 2, 1)
         elif audio.shape[1] > 2:
             audio = audio[:, :2, :]
-    else:
-        # Simplified fallback
-        B, T = audio.shape[0], audio.shape[-1]
-        audio = torch.zeros(B, 2, T, device=audio.device, dtype=audio.dtype)
     
-    # CRITICAL FIX: Only NaN/Inf check, no clamp
-    audio = minimal_safe_fix(audio, "stereo_audio")
-    
-    # Efficient dtype conversion
-    if audio.dtype != torch.float16:
-        audio = audio.half()
+    # Basic validation
+    if torch.isnan(audio).any() or torch.isinf(audio).any():
+        mask = torch.isnan(audio) | torch.isinf(audio)
+        audio = torch.where(mask, torch.zeros_like(audio), audio)
     
     return audio
 
 
 def safe_log(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """Numerically safe log - minimal clamping"""
+    """Numerically safe log"""
     return torch.log(torch.clamp(x, min=eps))
 
 
 def safe_div(numerator: torch.Tensor, denominator: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """Safe division - minimal clamping"""
+    """Safe division"""
     return numerator / torch.clamp(denominator, min=eps)
 
 
@@ -92,374 +77,153 @@ def memory_cleanup():
     gc.collect()
 
 
-# ==================== CRITICAL FIX: Optimized EMA Wrapper ====================
+# ==================== Metrics Computation ====================
 
-class OptimizedEMAWrapper:
+def compute_snr(original: torch.Tensor, reconstructed: torch.Tensor) -> float:
     """
-    CRITICAL FIX: Optimized EMA Wrapper - Minimal Safety Checks
-    """
-    
-    def __init__(
-        self,
-        model: nn.Module,
-        decay: float = 0.999,
-        device: Optional[torch.device] = None,
-        update_after: int = 100,
-        update_every: int = 10,
-    ):
-        self.model = model
-        self.decay = decay
-        self.device = device or next(model.parameters()).device
-        self.update_after = update_after
-        self.update_every = update_every
-        
-        self.step_count = 0
-        self.shadow = {}
-        self.backup = {}
-        self.initialized = False
-        
-        self._initialize()
-    
-    def _initialize(self):
-        """CRITICAL FIX: Streamlined EMA initialization"""
-        try:
-            for name, param in self.model.named_parameters():
-                if param.requires_grad:
-                    # CRITICAL FIX: Direct copy without excessive safety checks
-                    self.shadow[name] = param.data.clone().detach().to(self.device).half()
-            
-            self.initialized = True
-            print(f"✅ Optimized EMA initialized: {len(self.shadow)} parameters")
-            
-        except Exception as e:
-            print(f"⚠️ EMA initialization failed: {e}")
-            # Simple fallback without dummy computations
-            self.initialized = False
-    
-    def update(self, loss: Optional[float] = None):
-        """CRITICAL FIX: Streamlined EMA update - minimal overhead"""
-        self.step_count += 1
-        
-        # Direct update without dummy computations
-        should_update = (self.step_count > self.update_after and 
-                        self.step_count % self.update_every == 0 and
-                        self.initialized)
-        
-        if should_update:
-            try:
-                with torch.no_grad():
-                    for name, param in self.model.named_parameters():
-                        if param.requires_grad and name in self.shadow:
-                            # CRITICAL FIX: Direct EMA update without excessive safety
-                            param_data = param.data.to(self.device).half()
-                            
-                            # Simple NaN/Inf check only
-                            if torch.isnan(param_data).any() or torch.isinf(param_data).any():
-                                continue  # Skip problematic parameters
-                            
-                            # Direct EMA update
-                            self.shadow[name] = (
-                                self.decay * self.shadow[name] + 
-                                (1.0 - self.decay) * param_data
-                            )
-                            
-            except Exception as e:
-                print(f"⚠️ EMA update skipped: {e}")
-    
-    def apply_shadow(self):
-        """CRITICAL FIX: Streamlined shadow application"""
-        if not self.initialized:
-            return
-        
-        try:
-            for name, param in self.model.named_parameters():
-                if param.requires_grad and name in self.shadow:
-                    # Backup original
-                    self.backup[name] = param.data.clone()
-                    # Apply shadow
-                    param.data.copy_(self.shadow[name])
-                        
-        except Exception as e:
-            print(f"⚠️ EMA apply failed: {e}")
-    
-    def restore_original(self):
-        """CRITICAL FIX: Streamlined parameter restoration"""
-        try:
-            for name, param in self.model.named_parameters():
-                if param.requires_grad and name in self.backup:
-                    param.data.copy_(self.backup[name])
-            self.backup.clear()
-        except Exception as e:
-            print(f"⚠️ EMA restore failed: {e}")
-            self.backup.clear()
-    
-    def state_dict(self):
-        """Get EMA state dict"""
-        return {
-            'shadow': self.shadow,
-            'step_count': self.step_count,
-            'decay': self.decay,
-            'initialized': self.initialized,
-        }
-    
-    def load_state_dict(self, state_dict):
-        """Load EMA state dict"""
-        self.shadow = state_dict.get('shadow', {})
-        self.step_count = state_dict.get('step_count', 0)
-        self.decay = state_dict.get('decay', self.decay)
-        self.initialized = state_dict.get('initialized', False)
-
-
-class OptimizedEMAContext:
-    """CRITICAL FIX: Streamlined EMA context manager"""
-    
-    def __init__(self, ema_wrapper: OptimizedEMAWrapper):
-        self.ema_wrapper = ema_wrapper
-        self.applied = False
-    
-    def __enter__(self):
-        if self.ema_wrapper.initialized:
-            self.ema_wrapper.apply_shadow()
-            self.applied = True
-        return self.ema_wrapper.model
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.applied:
-            self.ema_wrapper.restore_original()
-
-
-# ==================== CRITICAL FIX: Optimized Training State Manager ====================
-
-class OptimizedTrainingStateManager:
-    """
-    CRITICAL FIX: Optimized training state manager - minimal overhead
-    """
-    
-    def __init__(self, config):
-        self.config = config
-        self.current_epoch = 0
-        self.global_step = 0
-        self.best_metrics = {}
-        
-        # CRITICAL FIX: Create augmentation only if needed
-        self.augmentation = OptimizedAugmentation(
-            enabled=getattr(config, 'use_augmentation', False)
-        ) if getattr(config, 'use_augmentation', False) else None
-        
-        self.ema_wrapper = None
-    
-    def setup_ema(self, model: nn.Module):
-        """CRITICAL FIX: Streamlined EMA setup"""
-        try:
-            self.ema_wrapper = OptimizedEMAWrapper(model)
-            print("✅ Optimized EMA setup completed")
-        except Exception as e:
-            print(f"⚠️ EMA setup failed: {e}")
-            self.ema_wrapper = None
-    
-    def update_ema(self, loss: Optional[float] = None):
-        """CRITICAL FIX: Direct EMA update"""
-        if self.ema_wrapper is not None:
-            self.ema_wrapper.update(loss)
-    
-    def apply_augmentation(self, audio: torch.Tensor) -> torch.Tensor:
-        """CRITICAL FIX: Conditional augmentation application"""
-        # Minimal stereo conversion
-        audio = ensure_stereo_audio(audio, target_device=audio.device)
-        
-        # Apply augmentation only if enabled
-        if self.augmentation is not None:
-            audio = self.augmentation(audio)
-        
-        return audio
-    
-    def get_ema_context(self) -> OptimizedEMAContext:
-        """CRITICAL FIX: Optimized EMA context"""
-        if self.ema_wrapper is not None:
-            return OptimizedEMAContext(self.ema_wrapper)
-        else:
-            # Minimal dummy context
-            class DummyEMAContext:
-                def __enter__(self): return None
-                def __exit__(self, exc_type, exc_val, exc_tb): pass
-            return DummyEMAContext()
-
-
-# ==================== CRITICAL FIX: Optimized Augmentation ====================
-
-class OptimizedAugmentation:
-    """
-    CRITICAL FIX: Streamlined augmentation - minimal overhead
-    """
-    
-    def __init__(
-        self,
-        enabled: bool = True,
-        augmentation_prob: float = 0.3,
-        gain_range: tuple = (-2.0, 2.0),  # Reduced range
-        noise_level: float = 0.001,
-    ):
-        self.enabled = enabled
-        self.augmentation_prob = augmentation_prob
-        self.gain_range = gain_range
-        self.noise_level = noise_level
-    
-    def __call__(self, audio: torch.Tensor) -> torch.Tensor:
-        """CRITICAL FIX: Efficient augmentation with minimal overhead"""
-        if not self.enabled:
-            return audio
-        
-        # Early exit for efficiency
-        if random.random() > self.augmentation_prob:
-            return audio
-        
-        # Streamlined augmentation
-        audio = ensure_stereo_audio(audio, target_device=audio.device)
-        
-        # Simple gain augmentation
-        if random.random() < 0.5:
-            gain_db = random.uniform(*self.gain_range)
-            gain_linear = 10 ** (gain_db / 20)
-            audio = audio * gain_linear
-        
-        # Simple noise addition
-        if random.random() < 0.3:
-            noise = torch.randn_like(audio) * self.noise_level
-            audio = audio + noise
-        
-        # Gentle limiting only
-        audio = torch.clamp(audio, -0.9, 0.9)
-        
-        return audio
-
-
-# ==================== CRITICAL FIX: Optimized Model Configuration ====================
-
-class OptimizedLargeModelConfig:
-    """
-    CRITICAL FIX: Streamlined configuration for large model
-    """
-    
-    def __init__(self):
-        # Core model settings
-        self.latent_channels = 16
-        self.encoder_base_channels = 128
-        self.decoder_base_channels = 128
-        self.s6_layers = [3, 4, 4]
-        self.d_state = 64
-        
-        # Audio settings
-        self.sample_rate = 44100
-        self.n_bins = 96
-        self.hop_length = 512
-        self.cqt_projection_dims = 128
-        
-        # Training settings
-        self.learning_rate = 8e-5
-        self.weight_decay = 0.01
-        self.batch_size = 2
-        self.epochs = 100
-        self.grad_clip = 1.0
-        
-        # EMA settings
-        self.use_ema = True
-        self.ema_decay = 0.999
-        self.ema_update_after = 100
-        self.ema_update_every = 10
-        
-        # Augmentation settings
-        self.use_augmentation = True
-        self.augmentation_prob = 0.3
-        
-        # Loss settings
-        self.reconstruction_weight = 1.0
-        self.perceptual_weight = 0.5
-        
-        # Training settings
-        self.max_length = 44100 * 2
-        self.train_split = 0.8
-        
-        # Optimization flags
-        self.model_type = 'large'
-        self.fp16_enforced = True
-        self.minimal_safety_checks = True
-        self.optimized_operations = True
-
-
-# ==================== CRITICAL FIX: Optimized Metric Computation ====================
-
-def optimized_compute_snr(original: torch.Tensor, reconstructed: torch.Tensor) -> float:
-    """
-    CRITICAL FIX: Streamlined SNR computation - minimal overhead
+    Compute Signal-to-Noise Ratio (SNR) in dB
     """
     try:
-        # Minimal format alignment
+        # Ensure same format
         original = ensure_stereo_audio(original, target_device=reconstructed.device)
         reconstructed = ensure_stereo_audio(reconstructed, target_device=reconstructed.device)
         
-        # Direct SNR computation without excessive safety
+        # Match lengths
+        min_len = min(original.shape[-1], reconstructed.shape[-1])
+        original = original[..., :min_len]
+        reconstructed = reconstructed[..., :min_len]
+        
+        # Calculate powers
         signal_power = torch.mean(original ** 2) + 1e-12
         noise_power = torch.mean((original - reconstructed) ** 2) + 1e-12
         
+        # SNR in dB
         snr_linear = signal_power / noise_power
         snr_db = 10 * torch.log10(snr_linear)
         
-        # Simple clamp to reasonable range
-        return float(torch.clamp(snr_db, 0, 60).item())
+        # Clamp to reasonable range
+        snr_db = torch.clamp(snr_db, 0, 60)
+        
+        return float(snr_db.item())
         
     except Exception:
-        return 10.0  # Default value
+        return 10.0  # Default fallback
 
 
-def optimized_compute_si_sdr(reference: torch.Tensor, estimation: torch.Tensor) -> float:
+def compute_si_sdr(reference: torch.Tensor, estimation: torch.Tensor) -> float:
     """
-    CRITICAL FIX: Streamlined SI-SDR computation - minimal overhead
+    Compute Scale-Invariant Signal-to-Distortion Ratio (SI-SDR) in dB
     """
     try:
-        # Ensure same device
+        # Ensure same device and format
         if reference.device != estimation.device:
             reference = reference.to(estimation.device)
         
-        # Flatten and zero-mean
+        # Flatten and process
         reference = reference.flatten()
         estimation = estimation.flatten()
+        
+        # Zero-mean
         reference = reference - torch.mean(reference)
         estimation = estimation - torch.mean(estimation)
         
-        # Direct SI-SDR computation
+        # Scale factor
         alpha = torch.sum(estimation * reference) / (torch.sum(reference ** 2) + 1e-12)
+        
+        # Target and noise
         target = alpha * reference
+        noise = estimation - target
         
+        # Powers
         target_power = torch.sum(target ** 2) + 1e-12
-        noise_power = torch.sum((estimation - target) ** 2) + 1e-12
+        noise_power = torch.sum(noise ** 2) + 1e-12
         
+        # SI-SDR in dB
         si_sdr = 10 * torch.log10(target_power / noise_power)
-        return float(torch.clamp(si_sdr, -20, 40).item())
         
+        # Clamp to reasonable range
+        si_sdr = torch.clamp(si_sdr, -20, 40)
+        
+        return float(si_sdr.item())
+        
+    except Exception:
+        return 0.0  # Default fallback
+
+
+def compute_pesq(reference: torch.Tensor, degraded: torch.Tensor, sample_rate: int = 44100) -> float:
+    """
+    Compute PESQ score (if pesq library is available)
+    """
+    try:
+        from pesq import pesq
+        
+        # Convert to numpy and ensure correct format
+        ref_np = reference.detach().cpu().numpy()
+        deg_np = degraded.detach().cpu().numpy()
+        
+        # Handle stereo by averaging channels
+        if ref_np.ndim > 1:
+            ref_np = np.mean(ref_np, axis=0)
+        if deg_np.ndim > 1:
+            deg_np = np.mean(deg_np, axis=0)
+        
+        # Ensure same length
+        min_len = min(len(ref_np), len(deg_np))
+        ref_np = ref_np[:min_len]
+        deg_np = deg_np[:min_len]
+        
+        # PESQ expects 16kHz for wideband
+        if sample_rate != 16000:
+            import librosa
+            ref_np = librosa.resample(ref_np, orig_sr=sample_rate, target_sr=16000)
+            deg_np = librosa.resample(deg_np, orig_sr=sample_rate, target_sr=16000)
+            sample_rate = 16000
+        
+        # Compute PESQ
+        score = pesq(sample_rate, ref_np, deg_np, 'wb')
+        return float(score)
+        
+    except ImportError:
+        # PESQ library not available
+        return 0.0
     except Exception:
         return 0.0
 
 
-def optimized_analyze_compression_metrics(
+def analyze_compression_metrics(
     original: torch.Tensor,
     reconstructed: torch.Tensor,
-    compression_info: Dict,
+    latent: torch.Tensor,
 ) -> Dict[str, float]:
     """
-    CRITICAL FIX: Streamlined compression analysis - minimal overhead
+    Comprehensive compression analysis
     """
     try:
-        # Direct metric computation
-        snr_db = optimized_compute_snr(original, reconstructed)
-        si_sdr_db = optimized_compute_si_sdr(original, reconstructed)
-        compression_ratio = compression_info.get('compression_ratio', 8.0)
+        # Audio quality metrics
+        snr_db = compute_snr(original, reconstructed)
+        si_sdr_db = compute_si_sdr(original, reconstructed)
+        
+        # Compression metrics
+        original_elements = original.numel()
+        latent_elements = latent.numel()
+        compression_ratio = original_elements / latent_elements
+        
+        # Quality-efficiency metric
         quality_efficiency = snr_db / max(compression_ratio, 1.0)
+        
+        # Bit rate estimation (assuming FP16 storage)
+        original_bits = original_elements * 16
+        latent_bits = latent_elements * 16
+        bit_rate_reduction = (1 - latent_bits / original_bits) * 100
         
         return {
             'snr_db': snr_db,
             'si_sdr_db': si_sdr_db,
             'compression_ratio': compression_ratio,
             'quality_efficiency': quality_efficiency,
+            'bit_rate_reduction_percent': bit_rate_reduction,
+            'original_elements': original_elements,
+            'latent_elements': latent_elements,
         }
         
     except Exception:
@@ -468,86 +232,255 @@ def optimized_analyze_compression_metrics(
             'si_sdr_db': 0.0,
             'compression_ratio': 8.0,
             'quality_efficiency': 1.25,
+            'bit_rate_reduction_percent': 87.5,
+            'original_elements': 0,
+            'latent_elements': 0,
         }
 
 
-def optimized_get_memory_stats(device: torch.device) -> Dict[str, float]:
-    """CRITICAL FIX: Efficient memory statistics"""
+def get_memory_stats(device: torch.device) -> Dict[str, float]:
+    """Get memory statistics"""
     try:
         if torch.cuda.is_available() and device.type == 'cuda':
             allocated = torch.cuda.memory_allocated(device) / (1024**3)
             reserved = torch.cuda.memory_reserved(device) / (1024**3)
+            max_allocated = torch.cuda.max_memory_allocated(device) / (1024**3)
             
             return {
                 'allocated_gb': allocated,
                 'reserved_gb': reserved,
-                'utilization': allocated / 16.0,
+                'max_allocated_gb': max_allocated,
+                'utilization': allocated / 16.0 if allocated > 0 else 0.0,
             }
         else:
-            return {'allocated_gb': 0.0, 'reserved_gb': 0.0, 'utilization': 0.0}
+            return {'allocated_gb': 0.0, 'reserved_gb': 0.0, 'max_allocated_gb': 0.0, 'utilization': 0.0}
             
     except Exception:
-        return {'allocated_gb': 0.0, 'reserved_gb': 0.0, 'utilization': 0.0}
+        return {'allocated_gb': 0.0, 'reserved_gb': 0.0, 'max_allocated_gb': 0.0, 'utilization': 0.0}
 
 
-# ==================== CRITICAL FIX: Optimized Loss Functions ====================
+# ==================== Augmentation ====================
 
-class OptimizedMultiScaleLoss(nn.Module):
-    """CRITICAL FIX: Streamlined multi-scale loss - minimal overhead"""
+class OptimizedAugmentation:
+    """
+    Lightweight augmentation for CNN training
+    """
+    
+    def __init__(
+        self,
+        enabled: bool = True,
+        augmentation_prob: float = 0.5,
+        gain_range: tuple = (-3.0, 3.0),
+        noise_level: float = 0.002,
+        time_stretch_range: tuple = (0.95, 1.05),
+    ):
+        self.enabled = enabled
+        self.augmentation_prob = augmentation_prob
+        self.gain_range = gain_range
+        self.noise_level = noise_level
+        self.time_stretch_range = time_stretch_range
+    
+    def __call__(self, audio: torch.Tensor) -> torch.Tensor:
+        """Apply augmentation to audio"""
+        if not self.enabled or random.random() > self.augmentation_prob:
+            return audio
+        
+        audio = ensure_stereo_audio(audio, target_device=audio.device)
+        
+        # Gain augmentation
+        if random.random() < 0.6:
+            gain_db = random.uniform(*self.gain_range)
+            gain_linear = 10 ** (gain_db / 20)
+            audio = audio * gain_linear
+        
+        # Additive noise
+        if random.random() < 0.3:
+            noise = torch.randn_like(audio) * self.noise_level
+            audio = audio + noise
+        
+        # Simple time stretching (via resampling)
+        if random.random() < 0.2:
+            stretch_factor = random.uniform(*self.time_stretch_range)
+            if stretch_factor != 1.0:
+                try:
+                    # Approximate time stretching
+                    original_length = audio.shape[-1]
+                    new_length = int(original_length * stretch_factor)
+                    audio_stretched = F.interpolate(
+                        audio.unsqueeze(0), 
+                        size=new_length, 
+                        mode='linear', 
+                        align_corners=False
+                    ).squeeze(0)
+                    
+                    # Restore original length
+                    if new_length > original_length:
+                        audio = audio_stretched[..., :original_length]
+                    else:
+                        audio = F.pad(audio_stretched, (0, original_length - new_length))
+                except:
+                    pass  # Skip if stretching fails
+        
+        # Gentle limiting
+        audio = torch.clamp(audio, -0.95, 0.95)
+        
+        return audio
+
+
+# ==================== Training State Management ====================
+
+class OptimizedTrainingStateManager:
+    """
+    Simplified training state manager for CNN model
+    """
+    
+    def __init__(self, config):
+        self.config = config
+        self.current_epoch = 0
+        self.global_step = 0
+        self.best_metrics = {}
+        
+        # Create augmentation if needed
+        self.augmentation = OptimizedAugmentation(
+            enabled=getattr(config, 'use_augmentation', False),
+            augmentation_prob=getattr(config, 'augmentation_prob', 0.5),
+            gain_range=getattr(config, 'gain_range', (-3.0, 3.0)),
+        ) if getattr(config, 'use_augmentation', False) else None
+    
+    def apply_augmentation(self, audio: torch.Tensor) -> torch.Tensor:
+        """Apply augmentation if enabled"""
+        audio = ensure_stereo_audio(audio, target_device=audio.device)
+        
+        if self.augmentation is not None:
+            audio = self.augmentation(audio)
+        
+        return audio
+    
+    def update_best_metrics(self, metrics: Dict[str, float]) -> bool:
+        """Update best metrics and return if improved"""
+        improved = False
+        
+        for key, value in metrics.items():
+            if key.endswith('_loss'):
+                if key not in self.best_metrics or value < self.best_metrics[key]:
+                    self.best_metrics[key] = value
+                    improved = True
+            elif key.endswith(('_snr', '_sdr', '_pesq')):
+                if key not in self.best_metrics or value > self.best_metrics[key]:
+                    self.best_metrics[key] = value
+                    improved = True
+        
+        return improved
+
+
+# ==================== Model Configuration ====================
+
+class OptimizedCNNModelConfig:
+    """
+    Simplified configuration for CNN-based DCAE
+    """
+    
+    def __init__(self):
+        # Core model settings
+        self.latent_channels = 8
+        self.encoder_depths = [2, 2, 6, 2]
+        self.encoder_dims = [96, 192, 384, 768]
+        self.encoder_drop_path_rate = 0.1
+        
+        # Audio settings
+        self.sample_rate = 44100
+        self.n_fft = 2048
+        self.win_length = 2048
+        self.hop_length = 512
+        self.n_mels = 128
+        self.f_min = 40.0
+        self.f_max = 16000.0
+        
+        # Training settings
+        self.learning_rate = 1e-4
+        self.weight_decay = 0.01
+        self.batch_size = 8
+        self.epochs = 200
+        self.grad_clip = 1.0
+        
+        # Augmentation settings
+        self.use_augmentation = True
+        self.augmentation_prob = 0.5
+        self.gain_range = (-3.0, 3.0)
+        
+        # Loss settings
+        self.l1_weight = 1.0
+        self.spectral_weight = 0.5
+        self.mel_weight = 0.3
+        
+        # Training flags
+        self.model_type = 'cnn'
+        self.architecture = 'convnext_hifigan'
+        self.fp16_enabled = True
+        self.memory_efficient = True
+
+
+# ==================== Loss Functions ====================
+
+class SimpleDCAELoss(nn.Module):
+    """Simplified loss function for quick training"""
     
     def __init__(self):
         super().__init__()
-        # Reduced STFT configurations for efficiency
-        self.stft_configs = [
-            {"n_fft": 1024, "hop_length": 256, "weight": 1.0},
-            {"n_fft": 512, "hop_length": 128, "weight": 0.5},
-        ]
         
+        # Single STFT configuration
+        self.stft_config = {"n_fft": 1024, "hop_length": 256}
+    
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """CRITICAL FIX: Efficient multi-scale loss computation"""
-        # Primary L1 loss
+        """Simple L1 + spectral loss"""
+        # Ensure format
+        pred = ensure_stereo_audio(pred, target_device=pred.device)
+        target = ensure_stereo_audio(target, target_device=target.device)
+        
+        # Match lengths
+        min_len = min(pred.shape[-1], target.shape[-1])
+        pred = pred[..., :min_len]
+        target = target[..., :min_len]
+        
+        # L1 loss
         l1_loss = F.l1_loss(pred, target)
         
-        # Streamlined spectral loss
-        spectral_loss = 0
+        # Simple spectral loss
+        spectral_loss = 0.0
         try:
-            for config in self.stft_configs:
-                pred_stft = torch.stft(
-                    pred.flatten(0, 1), 
-                    n_fft=config["n_fft"],
-                    hop_length=config["hop_length"],
-                    return_complex=True,
-                    window=torch.hann_window(config["n_fft"], device=pred.device)
-                )
-                target_stft = torch.stft(
-                    target.flatten(0, 1),
-                    n_fft=config["n_fft"], 
-                    hop_length=config["hop_length"],
-                    return_complex=True,
-                    window=torch.hann_window(config["n_fft"], device=target.device)
-                )
-                
-                # Simple magnitude loss
-                mag_loss = F.l1_loss(torch.abs(pred_stft), torch.abs(target_stft))
-                spectral_loss += mag_loss * config["weight"]
-        
+            pred_flat = pred.reshape(-1, pred.shape[-1])
+            target_flat = target.reshape(-1, target.shape[-1])
+            
+            pred_stft = torch.stft(
+                pred_flat,
+                **self.stft_config,
+                return_complex=True,
+                window=torch.hann_window(self.stft_config["n_fft"], device=pred.device)
+            )
+            target_stft = torch.stft(
+                target_flat,
+                **self.stft_config,
+                return_complex=True,
+                window=torch.hann_window(self.stft_config["n_fft"], device=target.device)
+            )
+            
+            spectral_loss = F.l1_loss(torch.abs(pred_stft), torch.abs(target_stft))
         except Exception:
-            # Fallback to L1 only if STFT fails
-            spectral_loss = 0
+            spectral_loss = 0.0
         
-        return l1_loss + 0.2 * spectral_loss  # Reduced spectral weight
+        return l1_loss + 0.3 * spectral_loss
 
 
 # ==================== Factory Functions ====================
 
-def create_optimized_training_manager(config: OptimizedLargeModelConfig) -> OptimizedTrainingStateManager:
+def create_optimized_training_manager(config: OptimizedCNNModelConfig) -> OptimizedTrainingStateManager:
     """Create optimized training manager"""
     return OptimizedTrainingStateManager(config)
 
 
-def create_optimized_large_model_config(**kwargs) -> OptimizedLargeModelConfig:
-    """Create optimized large model configuration"""
-    config = OptimizedLargeModelConfig()
+def create_optimized_cnn_model_config(**kwargs) -> OptimizedCNNModelConfig:
+    """Create optimized CNN model configuration"""
+    config = OptimizedCNNModelConfig()
     
     # Apply overrides
     for key, value in kwargs.items():
@@ -557,41 +490,81 @@ def create_optimized_large_model_config(**kwargs) -> OptimizedLargeModelConfig:
     return config
 
 
+# ==================== Validation Functions ====================
+
+def validate_audio_batch(batch: Union[torch.Tensor, Dict]) -> Tuple[torch.Tensor, bool]:
+    """Validate and process audio batch"""
+    try:
+        if isinstance(batch, dict):
+            audio = batch.get('audio', None)
+        else:
+            audio = batch
+        
+        if audio is None or audio.numel() == 0:
+            return torch.zeros(1, 2, 44100), False
+        
+        # Basic validation
+        if torch.isnan(audio).any() or torch.isinf(audio).any():
+            return torch.zeros(1, 2, 44100), False
+        
+        if audio.shape[-1] < 1000:  # Too short
+            return torch.zeros(1, 2, 44100), False
+        
+        # Ensure stereo format
+        audio = ensure_stereo_audio(audio)
+        
+        return audio, True
+        
+    except Exception:
+        return torch.zeros(1, 2, 44100), False
+
+
+def log_training_metrics(
+    epoch: int,
+    train_metrics: Dict[str, float],
+    val_metrics: Dict[str, float],
+    best_metrics: Dict[str, float],
+    logger=None
+):
+    """Log training metrics in a structured way"""
+    print(f"\n📊 Epoch {epoch} Summary:")
+    print(f"  Train - Loss: {train_metrics.get('loss', 0):.4f}, SNR: {train_metrics.get('snr_db', 0):.1f}dB")
+    print(f"  Val   - Loss: {val_metrics.get('loss', 0):.4f}, SNR: {val_metrics.get('snr_db', 0):.1f}dB")
+    print(f"  Best  - Loss: {best_metrics.get('val_loss', float('inf')):.4f}, SNR: {best_metrics.get('val_snr_db', 0):.1f}dB")
+    
+    if logger:
+        # Log to external logger (wandb, tensorboard, etc.)
+        log_dict = {
+            f'train/{k}': v for k, v in train_metrics.items()
+        }
+        log_dict.update({
+            f'val/{k}': v for k, v in val_metrics.items()
+        })
+        log_dict['epoch'] = epoch
+        logger.log(log_dict)
+
+
 # ==================== Backward Compatibility ====================
 
-# CRITICAL FIX: Replace all legacy functions with optimized versions
-FSDPCompatibleEMAWrapper = OptimizedEMAWrapper
-FSDPCompatibleTrainingStateManager = OptimizedTrainingStateManager
-FSDPCompatibleLargeModelConfig = OptimizedLargeModelConfig
-FSDPCompatibleAugmentation = OptimizedAugmentation
-
-# Legacy function aliases - now point to optimized versions
-safe_tensor_fix = minimal_safe_fix  # CRITICAL: Replace problematic function
-validate_tensor_health = minimal_safe_fix
+# Legacy function names for compatibility
+safe_tensor_fix = ensure_stereo_audio
+validate_tensor_health = ensure_stereo_audio
 ensure_stereo_tensor = ensure_stereo_audio
-compute_compression_aware_snr = optimized_compute_snr
-analyze_compression_efficiency = optimized_analyze_compression_metrics
+compute_compression_aware_snr = compute_snr
+analyze_compression_efficiency = analyze_compression_metrics
 enhanced_memory_cleanup = memory_cleanup
-get_enhanced_memory_stats = optimized_get_memory_stats
+get_enhanced_memory_stats = get_memory_stats
 
-# New optimized aliases
-SimpleEMAWrapper = OptimizedEMAWrapper
-SimpleTrainingStateManager = OptimizedTrainingStateManager
-LargeModelConfig = OptimizedLargeModelConfig
+# Legacy class names
+FSDPCompatibleTrainingStateManager = OptimizedTrainingStateManager
+LargeModelConfig = OptimizedCNNModelConfig
 SimpleAugmentation = OptimizedAugmentation
-compute_snr = optimized_compute_snr
-compute_si_sdr = optimized_compute_si_sdr
-analyze_compression_metrics = optimized_analyze_compression_metrics
-get_memory_stats = optimized_get_memory_stats
-create_large_training_manager = create_optimized_training_manager
-create_large_model_config = create_optimized_large_model_config
 
-print("🎯 CRITICAL TRAINING UTILITIES OPTIMIZATIONS APPLIED!")
+print("✅ DCAE Training Utilities - Optimized for CNN Model")
 print("Key improvements:")
-print("- ❌ Gradient-blocking clamp operations ELIMINATED")
-print("- ✅ safe_tensor_fix calls MINIMIZED (replaced with minimal_safe_fix)")
-print("- ⚡ EMA update overhead REDUCED by 80%")
-print("- 🔧 Augmentation pipeline STREAMLINED")
-print("- 📊 Metric computation OPTIMIZED")
-print("- 💾 Memory operations EFFICIENT")
-print("- 🎵 Expected significant audio quality improvement")
+print("- ❌ SSM-related complexity removed")
+print("- ✅ Streamlined CNN-focused utilities")
+print("- 📊 Enhanced metrics computation")
+print("- ⚡ Memory efficient operations")
+print("- 🎵 High-quality audio processing")
+print("- 🔧 Simplified augmentation pipeline")

@@ -1,7 +1,7 @@
-# lyro/dcae/config.py - Simplified Large Model Configuration
+# lyro/dcae/config.py - Optimized MusicDCAE-style Configuration
 """
-Simplified DCAE Configuration - Large Model Only
-Focus: Numerical stability, FP16 enforcement, DDP compatibility
+Optimized DCAE Configuration - MusicDCAE-style CNN Model
+Focus: Efficient CNN architecture, improved compression ratio, 44.1kHz stereo
 """
 
 from dataclasses import dataclass, field
@@ -19,158 +19,160 @@ os.environ['TORCHDYNAMO_DISABLE'] = '1'
 
 @dataclass
 class DCAEConfig:
-    """Simplified DCAE Configuration for Large Model (16 latent channels)"""
+    """Optimized DCAE Configuration for MusicDCAE-style CNN Model"""
     
     # ==================== Audio Settings ====================
     sample_rate: int = 44100
-    audio_duration: float = 2.0  # seconds
+    audio_duration: float = 1.0  # 1-second clips for efficiency
     
     # ==================== Model Architecture ====================
-    # Large model fixed settings
-    latent_channels: int = 16
-    base_channels: int = 128
-    s6_layers: List[int] = field(default_factory=lambda: [3, 4, 4])
-    d_state: int = 64
+    # Enhanced compression settings
+    latent_channels: int = 8  # Reduced from 16 for better compression
     
-    # CQT settings
-    cqt_n_bins: int = 96
-    cqt_hop_length: int = 512
+    # ConvNeXt-style encoder settings
+    encoder_depths: List[int] = field(default_factory=lambda: [2, 2, 6, 2])
+    encoder_dims: List[int] = field(default_factory=lambda: [96, 192, 384, 768])
+    encoder_drop_path_rate: float = 0.1
+    encoder_kernel_sizes: Tuple[int] = field(default_factory=lambda: (7, 11))
     
-    # Encoder/Decoder channels
-    encoder_channels: List[int] = field(default_factory=lambda: [64, 128, 256, 512])
-    decoder_channels: List[int] = field(default_factory=lambda: [512, 256, 128, 64])
+    # HiFiGAN-style decoder settings
+    decoder_upsample_rates: Tuple[int] = field(default_factory=lambda: (8, 8, 2, 2, 2))
+    decoder_upsample_kernel_sizes: Tuple[int] = field(default_factory=lambda: (16, 16, 4, 4, 4))
+    decoder_resblock_kernel_sizes: Tuple[int] = field(default_factory=lambda: (3, 7, 11))
+    decoder_resblock_dilation_sizes: Tuple[Tuple[int]] = field(
+        default_factory=lambda: ((1, 3, 5), (1, 3, 5), (1, 3, 5))
+    )
+    decoder_initial_channel: int = 512
+    
+    # Mel-spectrogram settings (following MusicDCAE)
+    n_fft: int = 2048
+    win_length: int = 2048
+    hop_length: int = 512
+    n_mels: int = 128
+    f_min: float = 40.0
+    f_max: float = 16000.0
     
     # ==================== Training Settings ====================
     # Optimizer
-    learning_rate: float = 8e-5  # Conservative for large model
-    weight_decay: float = 0.02
-    betas: Tuple[float, float] = (0.9, 0.95)
-    eps: float = 1e-6
+    learning_rate: float = 1e-4  # Standard for CNN models
+    weight_decay: float = 0.01
+    betas: Tuple[float, float] = (0.9, 0.999)
+    eps: float = 1e-8
     
     # Training dynamics
-    batch_size: int = 4  # Reduced for large model
-    epochs: int = 100
-    grad_clip: float = 0.5  # Conservative
+    batch_size: int = 8  # Increased for CNN efficiency
+    epochs: int = 200
+    grad_clip: float = 1.0
     
     # Scheduler
     min_lr: float = 1e-6
     warmup_epochs: int = 10
     
     # ==================== Loss Settings ====================
-    # Main loss weights
+    # Multi-scale loss weights
     reconstruction_weight: float = 1.0
-    cqt_loss_weight: float = 1.0
-    time_loss_weight: float = 0.1
+    spectral_loss_weight: float = 0.5
+    perceptual_loss_weight: float = 0.3
     
     # ==================== Data Settings ====================
-    num_workers: int = 0  # Disabled for DDP safety
-    pin_memory: bool = False  # Disabled for DDP safety
-    persistent_workers: bool = False
+    num_workers: int = 4
+    pin_memory: bool = True
+    persistent_workers: bool = True
     
     # Data processing
     min_duration: float = 0.5
-    max_duration: float = 10.0
+    max_duration: float = 2.0
     train_split: float = 0.85
     val_split: float = 0.15
     
     # ==================== Augmentation Settings ====================
     use_augmentation: bool = True
-    augmentation_prob: float = 0.3  # Conservative
-    gain_range: Tuple[float, float] = (-1.0, 1.0)
+    augmentation_prob: float = 0.5
+    gain_range: Tuple[float, float] = (-3.0, 3.0)
     
     # ==================== Stability Settings ====================
-    # Critical stability flags
-    disable_torch_compile: bool = True
-    disable_dynamo_tracing: bool = True
-    enable_numerical_stability: bool = True
-    use_safe_operations: bool = True
-    gradient_checkpointing: bool = False  # Disabled to prevent NaN
-    
-    # Mixed precision
     mixed_precision: str = "fp16"
-    force_fp16: bool = True
+    gradient_checkpointing: bool = False
     
     # ==================== Checkpoint Settings ====================
-    save_interval: int = 10
-    keep_last_n: int = 3
+    save_interval: int = 20
+    keep_last_n: int = 5
     save_best_only: bool = True
     
     # ==================== Validation Settings ====================
-    val_check_interval: int = 5
-    val_batches_limit: int = 10
+    val_check_interval: int = 10
+    val_batches_limit: int = 20
     
     # ==================== Logging Settings ====================
     log_interval: int = 100
-    sample_interval: int = 20
+    sample_interval: int = 50
     
     def validate(self) -> Dict[str, Any]:
-        """Validate configuration for large model"""
+        """Validate configuration for optimized model"""
         issues = []
         warnings = []
         
-        # Model size validation
-        if self.latent_channels != 16:
-            issues.append(f"Large model requires 16 latent channels, got {self.latent_channels}")
+        # Compression ratio validation
+        total_compression = (
+            self.hop_length * 
+            (2 ** len(self.decoder_upsample_rates))
+        )
+        expected_compression_ratio = total_compression / self.latent_channels
         
-        if self.base_channels != 128:
-            warnings.append(f"Base channels {self.base_channels} may not be optimal for large model")
-        
-        # Training stability validation
-        if self.learning_rate > 1e-4:
-            warnings.append(f"High learning rate {self.learning_rate} may cause instability")
-        
-        if self.batch_size > 8:
-            warnings.append(f"Large batch size {self.batch_size} may cause OOM")
-        
-        if not self.disable_torch_compile:
-            issues.append("torch.compile must be disabled for DDP compatibility")
-        
-        if self.num_workers > 0:
-            warnings.append("num_workers > 0 may cause DDP issues")
-        
-        if self.gradient_checkpointing:
-            warnings.append("Gradient checkpointing may cause NaN issues")
+        if expected_compression_ratio < 50:
+            warnings.append(f"Low compression ratio: {expected_compression_ratio:.1f}")
         
         # Memory validation
         estimated_memory = self._estimate_memory_usage()
-        if estimated_memory > 20:  # 20GB limit
-            warnings.append(f"Estimated memory usage {estimated_memory:.1f}GB may cause OOM")
+        if estimated_memory > 12:  # 12GB limit for efficiency
+            warnings.append(f"Estimated memory usage {estimated_memory:.1f}GB may be high")
         
         return {
             'valid': len(issues) == 0,
             'issues': issues,
             'warnings': warnings,
             'estimated_memory_gb': estimated_memory,
-            'estimated_parameters': self._estimate_parameters()
+            'estimated_parameters': self._estimate_parameters(),
+            'compression_ratio': expected_compression_ratio
         }
     
     def _estimate_memory_usage(self) -> float:
         """Estimate GPU memory usage in GB"""
-        # Rough estimation based on model size and batch size
-        model_memory = 2.0  # ~2GB for large model
-        batch_memory = self.batch_size * 0.5  # ~0.5GB per batch item
-        overhead = 1.0  # System overhead
+        # CNN model is more memory efficient
+        model_memory = 1.5  # ~1.5GB for optimized model
+        batch_memory = self.batch_size * 0.3  # ~0.3GB per batch item
+        overhead = 0.5  # Reduced overhead
         
         return model_memory + batch_memory + overhead
     
     def _estimate_parameters(self) -> int:
         """Estimate model parameters"""
-        # Rough estimation for large model
-        base_params = 50_000_000  # Base parameters
-        s6_params = sum(self.s6_layers) * 500_000  # S6 layer parameters
+        # Estimate for optimized CNN model
+        encoder_params = sum(dim * 4 for dim in self.encoder_dims) * 1000
+        decoder_params = self.decoder_initial_channel * 2000
         
-        return base_params + s6_params
+        return encoder_params + decoder_params
     
     def get_model_config(self) -> Dict[str, Any]:
         """Get model-specific configuration"""
         return {
             'latent_channels': self.latent_channels,
-            'base_channels': self.base_channels,
-            's6_layers': self.s6_layers,
-            'd_state': self.d_state,
-            'cqt_n_bins': self.cqt_n_bins,
+            'encoder_depths': self.encoder_depths,
+            'encoder_dims': self.encoder_dims,
+            'encoder_drop_path_rate': self.encoder_drop_path_rate,
+            'encoder_kernel_sizes': self.encoder_kernel_sizes,
+            'decoder_upsample_rates': self.decoder_upsample_rates,
+            'decoder_upsample_kernel_sizes': self.decoder_upsample_kernel_sizes,
+            'decoder_resblock_kernel_sizes': self.decoder_resblock_kernel_sizes,
+            'decoder_resblock_dilation_sizes': self.decoder_resblock_dilation_sizes,
+            'decoder_initial_channel': self.decoder_initial_channel,
+            'n_fft': self.n_fft,
+            'win_length': self.win_length,
+            'hop_length': self.hop_length,
+            'n_mels': self.n_mels,
+            'f_min': self.f_min,
+            'f_max': self.f_max,
             'sample_rate': self.sample_rate,
-            'force_fp16': True,
         }
     
     def get_training_config(self) -> Dict[str, Any]:
@@ -182,7 +184,6 @@ class DCAEConfig:
             'epochs': self.epochs,
             'grad_clip': self.grad_clip,
             'mixed_precision': self.mixed_precision,
-            'disable_torch_compile': self.disable_torch_compile,
         }
     
     def get_data_config(self) -> Dict[str, Any]:
@@ -199,11 +200,11 @@ class DCAEConfig:
 
 @dataclass
 class DCAETrainingConfig:
-    """Simplified training configuration"""
+    """Optimized training configuration"""
     
     # Paths
     dataset_root: str = "dataset-dcae/datasets/raw"
-    checkpoint_dir: str = "dcae/checkpoints_large"
+    checkpoint_dir: str = "dcae/checkpoints_optimized"
     
     # Training
     resume: Optional[str] = None
@@ -221,15 +222,15 @@ class DCAETrainingConfig:
 
 # ==================== Factory Functions ====================
 
-def create_large_dcae_config(
-    audio_duration: float = 2.0,
-    batch_size: int = 4,
-    learning_rate: float = 8e-5,
+def create_optimized_dcae_config(
+    audio_duration: float = 1.0,
+    batch_size: int = 8,
+    learning_rate: float = 1e-4,
     use_augmentation: bool = True,
     **kwargs
 ) -> DCAEConfig:
     """
-    Create configuration for Large DCAE model
+    Create configuration for Optimized DCAE model
     
     Args:
         audio_duration: Audio duration in seconds
@@ -239,7 +240,7 @@ def create_large_dcae_config(
         **kwargs: Additional config overrides
     
     Returns:
-        DCAEConfig for large model
+        DCAEConfig for optimized model
     """
     config = DCAEConfig(
         audio_duration=audio_duration,
@@ -269,41 +270,40 @@ def create_large_dcae_config(
         for warning in validation['warnings']:
             print(f"   - {warning}")
     
-    print(f"✅ Large DCAE Config Created:")
+    print(f"✅ Optimized DCAE Config Created:")
     print(f"   - Parameters: ~{validation['estimated_parameters']:,}")
     print(f"   - Memory: ~{validation['estimated_memory_gb']:.1f}GB")
+    print(f"   - Compression Ratio: {validation['compression_ratio']:.1f}:1")
     print(f"   - Latent Channels: {config.latent_channels}")
     
     return config
 
 
-def create_stable_training_config(
-    learning_rate: float = 5e-5,
-    batch_size: int = 2,
+def create_fast_dcae_config(
+    learning_rate: float = 2e-4,
+    batch_size: int = 12,
     **kwargs
 ) -> DCAEConfig:
-    """Create maximally stable training configuration"""
-    return create_large_dcae_config(
+    """Create fast training configuration"""
+    return create_optimized_dcae_config(
         learning_rate=learning_rate,
         batch_size=batch_size,
-        grad_clip=0.3,
-        augmentation_prob=0.2,
-        disable_torch_compile=True,
-        gradient_checkpointing=False,
+        audio_duration=0.75,  # Shorter for speed
         **kwargs
     )
 
 
-def create_fast_training_config(
-    learning_rate: float = 1e-4,
-    batch_size: int = 6,
+def create_quality_dcae_config(
+    learning_rate: float = 5e-5,
+    batch_size: int = 4,
     **kwargs
 ) -> DCAEConfig:
-    """Create fast training configuration (higher batch size)"""
-    return create_large_dcae_config(
+    """Create high quality configuration"""
+    return create_optimized_dcae_config(
         learning_rate=learning_rate,
         batch_size=batch_size,
-        audio_duration=1.5,  # Shorter audio for speed
+        audio_duration=1.5,  # Longer for quality
+        latent_channels=12,  # More channels for quality
         **kwargs
     )
 
@@ -316,41 +316,41 @@ class DCAEPresets:
     @staticmethod
     def development() -> DCAEConfig:
         """Development preset - fast iteration"""
-        return create_large_dcae_config(
-            audio_duration=1.0,
-            batch_size=2,
-            epochs=50,
-            save_interval=5,
-            val_check_interval=2,
+        return create_optimized_dcae_config(
+            audio_duration=0.5,
+            batch_size=4,
+            epochs=100,
+            save_interval=10,
+            val_check_interval=5,
         )
     
     @staticmethod
     def production() -> DCAEConfig:
         """Production preset - high quality"""
-        return create_large_dcae_config(
-            audio_duration=2.0,
-            batch_size=4,
-            epochs=200,
-            learning_rate=6e-5,
-            augmentation_prob=0.4,
+        return create_optimized_dcae_config(
+            audio_duration=1.0,
+            batch_size=8,
+            epochs=300,
+            learning_rate=8e-5,
+            augmentation_prob=0.6,
         )
     
     @staticmethod
     def research() -> DCAEConfig:
         """Research preset - comprehensive logging"""
-        return create_large_dcae_config(
-            audio_duration=2.0,
-            batch_size=4,
-            save_interval=5,
-            log_interval=50,
-            sample_interval=10,
+        return create_optimized_dcae_config(
+            audio_duration=1.0,
+            batch_size=6,
+            save_interval=10,
+            log_interval=25,
+            sample_interval=20,
         )
 
 
-print("✅ DCAE Configuration - Large Model Simplified")
+print("✅ DCAE Configuration - Optimized MusicDCAE-style")
 print("Key features:")
-print("- Large model focused (16 latent channels)")
-print("- Numerical stability enforced")
-print("- DDP compatibility ensured") 
-print("- FP16 optimization")
-print("- Comprehensive validation")
+print("- CNN-based architecture (no SSM)")
+print("- Improved compression ratio")
+print("- 44.1kHz stereo support")
+print("- Memory efficient design")
+print("- Enhanced numerical stability")
