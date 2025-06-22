@@ -1,7 +1,7 @@
-# lyro/dcae/config.py - Optimized MusicDCAE-style Configuration
+# lyro/dcae/config.py - Enhanced DCAE Configuration
 """
-Optimized DCAE Configuration - MusicDCAE-style CNN Model
-Focus: Efficient CNN architecture, improved compression ratio, 44.1kHz stereo
+Enhanced DCAE Configuration - Fixed architecture with direct waveform processing
+Focus: Direct waveform CNN architecture, improved compression ratio, 44.1kHz stereo
 """
 
 from dataclasses import dataclass, field
@@ -19,32 +19,31 @@ os.environ['TORCHDYNAMO_DISABLE'] = '1'
 
 @dataclass
 class DCAEConfig:
-    """Optimized DCAE Configuration for MusicDCAE-style CNN Model"""
+    """Enhanced DCAE Configuration for Direct Waveform Processing"""
     
     # ==================== Audio Settings ====================
     sample_rate: int = 44100
-    audio_duration: float = 1.0  # 1-second clips for efficiency
+    audio_duration: float = 1.0
     
     # ==================== Model Architecture ====================
-    # Enhanced compression settings
-    latent_channels: int = 8  # Reduced from 16 for better compression
+    latent_channels: int = 24  # Enhanced from 8 to 24
     
-    # ConvNeXt-style encoder settings
+    # Direct waveform encoder settings
     encoder_depths: List[int] = field(default_factory=lambda: [2, 2, 6, 2])
     encoder_dims: List[int] = field(default_factory=lambda: [96, 192, 384, 768])
     encoder_drop_path_rate: float = 0.1
-    encoder_kernel_sizes: Tuple[int] = field(default_factory=lambda: (7, 11))
+    encoder_downsample_factors: List[int] = field(default_factory=lambda: [4, 4, 4, 4])  # Total: 256x downsample
     
-    # HiFiGAN-style decoder settings
-    decoder_upsample_rates: Tuple[int] = field(default_factory=lambda: (8, 8, 2, 2, 2))
-    decoder_upsample_kernel_sizes: Tuple[int] = field(default_factory=lambda: (16, 16, 4, 4, 4))
+    # Direct waveform decoder settings
+    decoder_upsample_rates: Tuple[int] = field(default_factory=lambda: (4, 4, 4, 4))  # Total: 256x upsample
+    decoder_upsample_kernel_sizes: Tuple[int] = field(default_factory=lambda: (8, 8, 8, 8))
     decoder_resblock_kernel_sizes: Tuple[int] = field(default_factory=lambda: (3, 7, 11))
     decoder_resblock_dilation_sizes: Tuple[Tuple[int]] = field(
         default_factory=lambda: ((1, 3, 5), (1, 3, 5), (1, 3, 5))
     )
     decoder_initial_channel: int = 512
     
-    # Mel-spectrogram settings (following MusicDCAE)
+    # Mel-spectrogram settings (for loss computation only)
     n_fft: int = 2048
     win_length: int = 2048
     hop_length: int = 512
@@ -54,14 +53,14 @@ class DCAEConfig:
     
     # ==================== Training Settings ====================
     # Optimizer
-    learning_rate: float = 1e-4  # Standard for CNN models
+    learning_rate: float = 1e-4
     weight_decay: float = 0.01
     betas: Tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8
     
     # Training dynamics
-    batch_size: int = 8  # Increased for CNN efficiency
-    epochs: int = 200
+    batch_size: int = 6  # Reduced for larger model
+    epochs: int = 250
     grad_clip: float = 1.0
     
     # Scheduler
@@ -108,23 +107,30 @@ class DCAEConfig:
     sample_interval: int = 50
     
     def validate(self) -> Dict[str, Any]:
-        """Validate configuration for optimized model"""
+        """Validate configuration for enhanced model"""
         issues = []
         warnings = []
         
         # Compression ratio validation
-        total_compression = (
-            self.hop_length * 
-            (2 ** len(self.decoder_upsample_rates))
-        )
-        expected_compression_ratio = total_compression / self.latent_channels
+        total_downsample = 1
+        for factor in self.encoder_downsample_factors:
+            total_downsample *= factor
         
-        if expected_compression_ratio < 50:
+        total_upsample = 1
+        for rate in self.decoder_upsample_rates:
+            total_upsample *= rate
+        
+        if total_downsample != total_upsample:
+            issues.append(f"Downsample ({total_downsample}) != Upsample ({total_upsample})")
+        
+        expected_compression_ratio = total_downsample / self.latent_channels
+        
+        if expected_compression_ratio < 10:
             warnings.append(f"Low compression ratio: {expected_compression_ratio:.1f}")
         
         # Memory validation
         estimated_memory = self._estimate_memory_usage()
-        if estimated_memory > 12:  # 12GB limit for efficiency
+        if estimated_memory > 14:  # 14GB limit for safety
             warnings.append(f"Estimated memory usage {estimated_memory:.1f}GB may be high")
         
         return {
@@ -133,23 +139,25 @@ class DCAEConfig:
             'warnings': warnings,
             'estimated_memory_gb': estimated_memory,
             'estimated_parameters': self._estimate_parameters(),
-            'compression_ratio': expected_compression_ratio
+            'compression_ratio': expected_compression_ratio,
+            'total_downsample': total_downsample,
+            'total_upsample': total_upsample
         }
     
     def _estimate_memory_usage(self) -> float:
         """Estimate GPU memory usage in GB"""
-        # CNN model is more memory efficient
-        model_memory = 1.5  # ~1.5GB for optimized model
-        batch_memory = self.batch_size * 0.3  # ~0.3GB per batch item
-        overhead = 0.5  # Reduced overhead
+        # Enhanced model is larger but more efficient
+        model_memory = 2.0  # ~2.0GB for enhanced model
+        batch_memory = self.batch_size * 0.4  # ~0.4GB per batch item
+        overhead = 0.8  # Enhanced overhead for larger model
         
         return model_memory + batch_memory + overhead
     
     def _estimate_parameters(self) -> int:
         """Estimate model parameters"""
-        # Estimate for optimized CNN model
-        encoder_params = sum(dim * 4 for dim in self.encoder_dims) * 1000
-        decoder_params = self.decoder_initial_channel * 2000
+        # Estimate for enhanced direct waveform model
+        encoder_params = sum(dim * 8 for dim in self.encoder_dims) * 1000  # Larger encoder
+        decoder_params = self.decoder_initial_channel * 3000  # Larger decoder
         
         return encoder_params + decoder_params
     
@@ -160,7 +168,7 @@ class DCAEConfig:
             'encoder_depths': self.encoder_depths,
             'encoder_dims': self.encoder_dims,
             'encoder_drop_path_rate': self.encoder_drop_path_rate,
-            'encoder_kernel_sizes': self.encoder_kernel_sizes,
+            'encoder_downsample_factors': self.encoder_downsample_factors,
             'decoder_upsample_rates': self.decoder_upsample_rates,
             'decoder_upsample_kernel_sizes': self.decoder_upsample_kernel_sizes,
             'decoder_resblock_kernel_sizes': self.decoder_resblock_kernel_sizes,
@@ -200,11 +208,11 @@ class DCAEConfig:
 
 @dataclass
 class DCAETrainingConfig:
-    """Optimized training configuration"""
+    """Enhanced training configuration"""
     
     # Paths
     dataset_root: str = "dataset-dcae/datasets/raw"
-    checkpoint_dir: str = "dcae/checkpoints_optimized"
+    checkpoint_dir: str = "dcae/checkpoints_enhanced"
     
     # Training
     resume: Optional[str] = None
@@ -220,17 +228,15 @@ class DCAETrainingConfig:
             self.device = "cpu"
 
 
-# ==================== Factory Functions ====================
-
-def create_optimized_dcae_config(
+def create_enhanced_dcae_config(
     audio_duration: float = 1.0,
-    batch_size: int = 8,
+    batch_size: int = 6,
     learning_rate: float = 1e-4,
     use_augmentation: bool = True,
     **kwargs
 ) -> DCAEConfig:
     """
-    Create configuration for Optimized DCAE model
+    Create configuration for Enhanced DCAE model
     
     Args:
         audio_duration: Audio duration in seconds
@@ -240,7 +246,7 @@ def create_optimized_dcae_config(
         **kwargs: Additional config overrides
     
     Returns:
-        DCAEConfig for optimized model
+        DCAEConfig for enhanced model
     """
     config = DCAEConfig(
         audio_duration=audio_duration,
@@ -260,32 +266,33 @@ def create_optimized_dcae_config(
     validation = config.validate()
     
     if not validation['valid']:
-        print("❌ Configuration validation failed:")
+        print("Configuration validation failed:")
         for issue in validation['issues']:
             print(f"   - {issue}")
         raise ValueError("Configuration validation failed")
     
     if validation['warnings']:
-        print("⚠️ Configuration warnings:")
+        print("Configuration warnings:")
         for warning in validation['warnings']:
             print(f"   - {warning}")
     
-    print(f"✅ Optimized DCAE Config Created:")
+    print(f"Enhanced DCAE Config Created:")
     print(f"   - Parameters: ~{validation['estimated_parameters']:,}")
     print(f"   - Memory: ~{validation['estimated_memory_gb']:.1f}GB")
     print(f"   - Compression Ratio: {validation['compression_ratio']:.1f}:1")
     print(f"   - Latent Channels: {config.latent_channels}")
+    print(f"   - Downsample/Upsample: {validation['total_downsample']}x")
     
     return config
 
 
 def create_fast_dcae_config(
     learning_rate: float = 2e-4,
-    batch_size: int = 12,
+    batch_size: int = 8,
     **kwargs
 ) -> DCAEConfig:
     """Create fast training configuration"""
-    return create_optimized_dcae_config(
+    return create_enhanced_dcae_config(
         learning_rate=learning_rate,
         batch_size=batch_size,
         audio_duration=0.75,  # Shorter for speed
@@ -299,16 +306,14 @@ def create_quality_dcae_config(
     **kwargs
 ) -> DCAEConfig:
     """Create high quality configuration"""
-    return create_optimized_dcae_config(
+    return create_enhanced_dcae_config(
         learning_rate=learning_rate,
         batch_size=batch_size,
         audio_duration=1.5,  # Longer for quality
-        latent_channels=12,  # More channels for quality
+        latent_channels=32,  # More channels for quality
         **kwargs
     )
 
-
-# ==================== Presets ====================
 
 class DCAEPresets:
     """Predefined configuration presets"""
@@ -316,7 +321,7 @@ class DCAEPresets:
     @staticmethod
     def development() -> DCAEConfig:
         """Development preset - fast iteration"""
-        return create_optimized_dcae_config(
+        return create_enhanced_dcae_config(
             audio_duration=0.5,
             batch_size=4,
             epochs=100,
@@ -327,9 +332,9 @@ class DCAEPresets:
     @staticmethod
     def production() -> DCAEConfig:
         """Production preset - high quality"""
-        return create_optimized_dcae_config(
+        return create_enhanced_dcae_config(
             audio_duration=1.0,
-            batch_size=8,
+            batch_size=6,
             epochs=300,
             learning_rate=8e-5,
             augmentation_prob=0.6,
@@ -338,19 +343,16 @@ class DCAEPresets:
     @staticmethod
     def research() -> DCAEConfig:
         """Research preset - comprehensive logging"""
-        return create_optimized_dcae_config(
+        return create_enhanced_dcae_config(
             audio_duration=1.0,
-            batch_size=6,
+            batch_size=5,
             save_interval=10,
             log_interval=25,
             sample_interval=20,
         )
 
 
-print("✅ DCAE Configuration - Optimized MusicDCAE-style")
-print("Key features:")
-print("- CNN-based architecture (no SSM)")
-print("- Improved compression ratio")
-print("- 44.1kHz stereo support")
-print("- Memory efficient design")
-print("- Enhanced numerical stability")
+# Legacy compatibility
+create_optimized_dcae_config = create_enhanced_dcae_config
+create_fast_training_config = create_fast_dcae_config
+create_quality_training_config = create_quality_dcae_config

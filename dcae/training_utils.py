@@ -1,6 +1,6 @@
-# lyro/dcae/training_utils.py - Optimized CNN Model Training Utilities
+# lyro/dcae/training_utils.py - Optimized Training Utilities
 """
-Training Utilities - Optimized for CNN-based DCAE Model
+Training Utilities - Optimized for Enhanced DCAE Model
 Features: Simplified utilities, enhanced metrics, memory efficiency
 """
 
@@ -22,17 +22,12 @@ torch._dynamo.config.disable = True
 os.environ['TORCH_COMPILE_DISABLE'] = '1'
 
 
-# ==================== Audio Utilities ====================
-
 def ensure_stereo_audio(audio: torch.Tensor, target_device: Optional[torch.device] = None) -> torch.Tensor:
-    """
-    Ensure stereo audio format with minimal processing
-    """
+    """Ensure stereo audio format with minimal processing"""
     if audio is None:
         device = target_device or torch.device('cpu')
         return torch.zeros(1, 2, 44100, device=device, dtype=torch.float32)
     
-    # Device alignment
     if target_device is not None and audio.device != target_device:
         audio = audio.to(target_device)
     
@@ -77,114 +72,87 @@ def memory_cleanup():
     gc.collect()
 
 
-# ==================== Metrics Computation ====================
-
 def compute_snr(original: torch.Tensor, reconstructed: torch.Tensor) -> float:
-    """
-    Compute Signal-to-Noise Ratio (SNR) in dB
-    """
+    """Compute Signal-to-Noise Ratio (SNR) in dB"""
     try:
-        # Ensure same format
         original = ensure_stereo_audio(original, target_device=reconstructed.device)
         reconstructed = ensure_stereo_audio(reconstructed, target_device=reconstructed.device)
         
-        # Match lengths
         min_len = min(original.shape[-1], reconstructed.shape[-1])
         original = original[..., :min_len]
         reconstructed = reconstructed[..., :min_len]
         
-        # Calculate powers
         signal_power = torch.mean(original ** 2) + 1e-12
         noise_power = torch.mean((original - reconstructed) ** 2) + 1e-12
         
-        # SNR in dB
         snr_linear = signal_power / noise_power
         snr_db = 10 * torch.log10(snr_linear)
         
-        # Clamp to reasonable range
         snr_db = torch.clamp(snr_db, 0, 60)
         
         return float(snr_db.item())
         
     except Exception:
-        return 10.0  # Default fallback
+        return 10.0
 
 
 def compute_si_sdr(reference: torch.Tensor, estimation: torch.Tensor) -> float:
-    """
-    Compute Scale-Invariant Signal-to-Distortion Ratio (SI-SDR) in dB
-    """
+    """Compute Scale-Invariant Signal-to-Distortion Ratio (SI-SDR) in dB"""
     try:
-        # Ensure same device and format
         if reference.device != estimation.device:
             reference = reference.to(estimation.device)
         
-        # Flatten and process
         reference = reference.flatten()
         estimation = estimation.flatten()
         
-        # Zero-mean
         reference = reference - torch.mean(reference)
         estimation = estimation - torch.mean(estimation)
         
-        # Scale factor
         alpha = torch.sum(estimation * reference) / (torch.sum(reference ** 2) + 1e-12)
         
-        # Target and noise
         target = alpha * reference
         noise = estimation - target
         
-        # Powers
         target_power = torch.sum(target ** 2) + 1e-12
         noise_power = torch.sum(noise ** 2) + 1e-12
         
-        # SI-SDR in dB
         si_sdr = 10 * torch.log10(target_power / noise_power)
         
-        # Clamp to reasonable range
         si_sdr = torch.clamp(si_sdr, -20, 40)
         
         return float(si_sdr.item())
         
     except Exception:
-        return 0.0  # Default fallback
+        return 0.0
 
 
 def compute_pesq(reference: torch.Tensor, degraded: torch.Tensor, sample_rate: int = 44100) -> float:
-    """
-    Compute PESQ score (if pesq library is available)
-    """
+    """Compute PESQ score (if pesq library is available)"""
     try:
         from pesq import pesq
         
-        # Convert to numpy and ensure correct format
         ref_np = reference.detach().cpu().numpy()
         deg_np = degraded.detach().cpu().numpy()
         
-        # Handle stereo by averaging channels
         if ref_np.ndim > 1:
             ref_np = np.mean(ref_np, axis=0)
         if deg_np.ndim > 1:
             deg_np = np.mean(deg_np, axis=0)
         
-        # Ensure same length
         min_len = min(len(ref_np), len(deg_np))
         ref_np = ref_np[:min_len]
         deg_np = deg_np[:min_len]
         
-        # PESQ expects 16kHz for wideband
         if sample_rate != 16000:
             import librosa
             ref_np = librosa.resample(ref_np, orig_sr=sample_rate, target_sr=16000)
             deg_np = librosa.resample(deg_np, orig_sr=sample_rate, target_sr=16000)
             sample_rate = 16000
         
-        # Compute PESQ
         score = pesq(sample_rate, ref_np, deg_np, 'wb')
         return float(score)
         
     except ImportError:
-        # PESQ library not available
         return 0.0
     except Exception:
         return 0.0
@@ -195,23 +163,17 @@ def analyze_compression_metrics(
     reconstructed: torch.Tensor,
     latent: torch.Tensor,
 ) -> Dict[str, float]:
-    """
-    Comprehensive compression analysis
-    """
+    """Comprehensive compression analysis"""
     try:
-        # Audio quality metrics
         snr_db = compute_snr(original, reconstructed)
         si_sdr_db = compute_si_sdr(original, reconstructed)
         
-        # Compression metrics
         original_elements = original.numel()
         latent_elements = latent.numel()
         compression_ratio = original_elements / latent_elements
         
-        # Quality-efficiency metric
         quality_efficiency = snr_db / max(compression_ratio, 1.0)
         
-        # Bit rate estimation (assuming FP16 storage)
         original_bits = original_elements * 16
         latent_bits = latent_elements * 16
         bit_rate_reduction = (1 - latent_bits / original_bits) * 100
@@ -259,12 +221,8 @@ def get_memory_stats(device: torch.device) -> Dict[str, float]:
         return {'allocated_gb': 0.0, 'reserved_gb': 0.0, 'max_allocated_gb': 0.0, 'utilization': 0.0}
 
 
-# ==================== Augmentation ====================
-
 class OptimizedAugmentation:
-    """
-    Lightweight augmentation for CNN training
-    """
+    """Lightweight augmentation for training"""
     
     def __init__(
         self,
@@ -303,7 +261,6 @@ class OptimizedAugmentation:
             stretch_factor = random.uniform(*self.time_stretch_range)
             if stretch_factor != 1.0:
                 try:
-                    # Approximate time stretching
                     original_length = audio.shape[-1]
                     new_length = int(original_length * stretch_factor)
                     audio_stretched = F.interpolate(
@@ -313,13 +270,12 @@ class OptimizedAugmentation:
                         align_corners=False
                     ).squeeze(0)
                     
-                    # Restore original length
                     if new_length > original_length:
                         audio = audio_stretched[..., :original_length]
                     else:
                         audio = F.pad(audio_stretched, (0, original_length - new_length))
                 except:
-                    pass  # Skip if stretching fails
+                    pass
         
         # Gentle limiting
         audio = torch.clamp(audio, -0.95, 0.95)
@@ -327,12 +283,8 @@ class OptimizedAugmentation:
         return audio
 
 
-# ==================== Training State Management ====================
-
 class OptimizedTrainingStateManager:
-    """
-    Simplified training state manager for CNN model
-    """
+    """Simplified training state manager"""
     
     def __init__(self, config):
         self.config = config
@@ -340,7 +292,6 @@ class OptimizedTrainingStateManager:
         self.global_step = 0
         self.best_metrics = {}
         
-        # Create augmentation if needed
         self.augmentation = OptimizedAugmentation(
             enabled=getattr(config, 'use_augmentation', False),
             augmentation_prob=getattr(config, 'augmentation_prob', 0.5),
@@ -373,16 +324,12 @@ class OptimizedTrainingStateManager:
         return improved
 
 
-# ==================== Model Configuration ====================
-
-class OptimizedCNNModelConfig:
-    """
-    Simplified configuration for CNN-based DCAE
-    """
+class OptimizedModelConfig:
+    """Simplified configuration for Enhanced DCAE"""
     
     def __init__(self):
         # Core model settings
-        self.latent_channels = 8
+        self.latent_channels = 24
         self.encoder_depths = [2, 2, 6, 2]
         self.encoder_dims = [96, 192, 384, 768]
         self.encoder_drop_path_rate = 0.1
@@ -399,8 +346,8 @@ class OptimizedCNNModelConfig:
         # Training settings
         self.learning_rate = 1e-4
         self.weight_decay = 0.01
-        self.batch_size = 8
-        self.epochs = 200
+        self.batch_size = 6
+        self.epochs = 250
         self.grad_clip = 1.0
         
         # Augmentation settings
@@ -414,13 +361,11 @@ class OptimizedCNNModelConfig:
         self.mel_weight = 0.3
         
         # Training flags
-        self.model_type = 'cnn'
-        self.architecture = 'convnext_hifigan'
+        self.model_type = 'enhanced_dcae'
+        self.architecture = 'direct_waveform_convnext_hifigan'
         self.fp16_enabled = True
         self.memory_efficient = True
 
-
-# ==================== Loss Functions ====================
 
 class SimpleDCAELoss(nn.Module):
     """Simplified loss function for quick training"""
@@ -428,24 +373,19 @@ class SimpleDCAELoss(nn.Module):
     def __init__(self):
         super().__init__()
         
-        # Single STFT configuration
         self.stft_config = {"n_fft": 1024, "hop_length": 256}
     
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Simple L1 + spectral loss"""
-        # Ensure format
         pred = ensure_stereo_audio(pred, target_device=pred.device)
         target = ensure_stereo_audio(target, target_device=target.device)
         
-        # Match lengths
         min_len = min(pred.shape[-1], target.shape[-1])
         pred = pred[..., :min_len]
         target = target[..., :min_len]
         
-        # L1 loss
         l1_loss = F.l1_loss(pred, target)
         
-        # Simple spectral loss
         spectral_loss = 0.0
         try:
             pred_flat = pred.reshape(-1, pred.shape[-1])
@@ -471,26 +411,21 @@ class SimpleDCAELoss(nn.Module):
         return l1_loss + 0.3 * spectral_loss
 
 
-# ==================== Factory Functions ====================
-
-def create_optimized_training_manager(config: OptimizedCNNModelConfig) -> OptimizedTrainingStateManager:
+def create_optimized_training_manager(config: OptimizedModelConfig) -> OptimizedTrainingStateManager:
     """Create optimized training manager"""
     return OptimizedTrainingStateManager(config)
 
 
-def create_optimized_cnn_model_config(**kwargs) -> OptimizedCNNModelConfig:
-    """Create optimized CNN model configuration"""
-    config = OptimizedCNNModelConfig()
+def create_optimized_model_config(**kwargs) -> OptimizedModelConfig:
+    """Create optimized model configuration"""
+    config = OptimizedModelConfig()
     
-    # Apply overrides
     for key, value in kwargs.items():
         if hasattr(config, key):
             setattr(config, key, value)
     
     return config
 
-
-# ==================== Validation Functions ====================
 
 def validate_audio_batch(batch: Union[torch.Tensor, Dict]) -> Tuple[torch.Tensor, bool]:
     """Validate and process audio batch"""
@@ -503,14 +438,12 @@ def validate_audio_batch(batch: Union[torch.Tensor, Dict]) -> Tuple[torch.Tensor
         if audio is None or audio.numel() == 0:
             return torch.zeros(1, 2, 44100), False
         
-        # Basic validation
         if torch.isnan(audio).any() or torch.isinf(audio).any():
             return torch.zeros(1, 2, 44100), False
         
-        if audio.shape[-1] < 1000:  # Too short
+        if audio.shape[-1] < 1000:
             return torch.zeros(1, 2, 44100), False
         
-        # Ensure stereo format
         audio = ensure_stereo_audio(audio)
         
         return audio, True
@@ -527,13 +460,12 @@ def log_training_metrics(
     logger=None
 ):
     """Log training metrics in a structured way"""
-    print(f"\n📊 Epoch {epoch} Summary:")
+    print(f"\nEpoch {epoch} Summary:")
     print(f"  Train - Loss: {train_metrics.get('loss', 0):.4f}, SNR: {train_metrics.get('snr_db', 0):.1f}dB")
     print(f"  Val   - Loss: {val_metrics.get('loss', 0):.4f}, SNR: {val_metrics.get('snr_db', 0):.1f}dB")
     print(f"  Best  - Loss: {best_metrics.get('val_loss', float('inf')):.4f}, SNR: {best_metrics.get('val_snr_db', 0):.1f}dB")
     
     if logger:
-        # Log to external logger (wandb, tensorboard, etc.)
         log_dict = {
             f'train/{k}': v for k, v in train_metrics.items()
         }
@@ -543,8 +475,6 @@ def log_training_metrics(
         log_dict['epoch'] = epoch
         logger.log(log_dict)
 
-
-# ==================== Backward Compatibility ====================
 
 # Legacy function names for compatibility
 safe_tensor_fix = ensure_stereo_audio
@@ -557,14 +487,5 @@ get_enhanced_memory_stats = get_memory_stats
 
 # Legacy class names
 FSDPCompatibleTrainingStateManager = OptimizedTrainingStateManager
-LargeModelConfig = OptimizedCNNModelConfig
+LargeModelConfig = OptimizedModelConfig
 SimpleAugmentation = OptimizedAugmentation
-
-print("✅ DCAE Training Utilities - Optimized for CNN Model")
-print("Key improvements:")
-print("- ❌ SSM-related complexity removed")
-print("- ✅ Streamlined CNN-focused utilities")
-print("- 📊 Enhanced metrics computation")
-print("- ⚡ Memory efficient operations")
-print("- 🎵 High-quality audio processing")
-print("- 🔧 Simplified augmentation pipeline")
