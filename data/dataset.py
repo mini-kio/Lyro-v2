@@ -1,7 +1,7 @@
 # lyro/data/dataset.py
 """
-LYRO Dataset - Unified and simplified
-Supports lyrics, captions, and reference audio
+LYRO Dataset - Task-based unified structure
+Supports task-specific metadata with validation
 """
 
 import os
@@ -18,8 +18,8 @@ from tqdm import tqdm
 
 class LyroDataset(Dataset):
     """
-    Unified LYRO dataset for music generation
-    Supports multiple conditioning modalities
+    Unified LYRO dataset with task-based structure
+    Supports SONG, INST, and COVER tasks with proper validation
     """
     
     def __init__(
@@ -47,16 +47,16 @@ class LyroDataset(Dataset):
         # Default task ratios
         if task_ratios is None:
             task_ratios = {
-                'SONG': 0.6,     # Lyrics + audio
-                'INST': 0.2,     # Caption + audio (no lyrics)
-                'COVER': 0.2     # Reference + lyrics + audio
+                'SONG': 0.6,     # Lyrics + audio (no reference)
+                'INST': 0.3,     # Caption + audio (optional reference)
+                'COVER': 0.1     # Reference + lyrics/caption + audio
             }
         self.task_ratios = task_ratios
         
-        # Load metadata
+        # Load and validate metadata
         self.metadata = self._load_metadata()
         
-        # Filter and balance by tasks
+        # Prepare samples with task validation
         self.samples = self._prepare_samples()
         
         # Audio cache
@@ -67,9 +67,10 @@ class LyroDataset(Dataset):
             self._preload_samples(min(preload_count, len(self.samples)))
             
         print(f"Loaded {len(self.samples)} samples from {self.metadata_path}")
+        print(f"Task distribution: {self._get_task_distribution()}")
         
     def _load_metadata(self) -> List[Dict]:
-        """Load metadata from JSONL file"""
+        """Load and validate metadata from JSONL file"""
         metadata = []
         
         if not self.metadata_path.exists():
@@ -80,18 +81,10 @@ class LyroDataset(Dataset):
                 try:
                     item = json.loads(line.strip())
                     
-                    # Validate required fields
-                    if 'id' not in item or 'audio_path' not in item:
-                        continue
+                    # Validate and normalize item
+                    if self._validate_metadata_item(item, line_num):
+                        metadata.append(item)
                         
-                    # Check if files exist
-                    audio_path = self.dataset_root / item['audio_path']
-                    if not audio_path.exists():
-                        if self.filter_corrupted:
-                            continue
-                        
-                    metadata.append(item)
-                    
                 except json.JSONDecodeError:
                     print(f"Warning: Invalid JSON at line {line_num}")
                     continue
@@ -101,120 +94,149 @@ class LyroDataset(Dataset):
                     
         return metadata
     
-    def _prepare_samples(self) -> List[Dict]:
-        """Prepare and balance samples by task"""
-        samples = []
+    def _validate_metadata_item(self, item: Dict, line_num: int) -> bool:
+        """
+        Validate metadata item according to task-specific rules
         
-        # Separate samples by available modalities
-        song_samples = []      # Have lyrics
-        inst_samples = []      # No lyrics but have captions/genre
-        cover_samples = []     # Have reference audio capability
+        Task validation rules:
+        - SONG: must have lyrics, no reference_path
+        - INST: no lyrics, optional reference_path
+        - COVER: must have reference_path, lyrics optional (for instrumental covers)
+        """
+        # Basic required fields
+        if 'id' not in item or 'audio_path' not in item or 'task' not in item:
+            if self.filter_corrupted:
+                print(f"Warning: Missing required fields at line {line_num}")
+                return False
+        
+        task = item.get('task', '').upper()
+        
+        # Validate task type
+        if task not in ['SONG', 'INST', 'COVER']:
+            if self.filter_corrupted:
+                print(f"Warning: Invalid task '{task}' at line {line_num}")
+                return False
+            # Default to INST if task is invalid
+            item['task'] = 'INST'
+            task = 'INST'
+        
+        # Task-specific validation
+        has_lyrics = bool(item.get('lyrics', '').strip())
+        has_reference = bool(item.get('reference_path', '').strip())
+        
+        if task == 'SONG':
+            # SONG: must have lyrics, no reference
+            if not has_lyrics:
+                if self.filter_corrupted:
+                    print(f"Warning: SONG task missing lyrics at line {line_num}")
+                    return False
+            if has_reference:
+                if self.filter_corrupted:
+                    print(f"Warning: SONG task should not have reference_path at line {line_num}")
+                # Remove reference_path for SONG task
+                item.pop('reference_path', None)
+        
+        elif task == 'INST':
+            # INST: no lyrics, optional reference
+            if has_lyrics:
+                if self.filter_corrupted:
+                    print(f"Warning: INST task should not have lyrics at line {line_num}")
+                # Remove lyrics for INST task
+                item.pop('lyrics', None)
+        
+        elif task == 'COVER':
+            # COVER: must have reference, lyrics optional
+            if not has_reference:
+                if self.filter_corrupted:
+                    print(f"Warning: COVER task missing reference_path at line {line_num}")
+                    return False
+        
+        # Validate file existence
+        audio_path = self.dataset_root / item['audio_path']
+        if not audio_path.exists():
+            if self.filter_corrupted:
+                print(f"Warning: Audio file not found: {audio_path}")
+                return False
+        
+        # Validate reference audio existence for COVER tasks
+        if task == 'COVER' and has_reference:
+            ref_path = self.dataset_root / item['reference_path']
+            if not ref_path.exists():
+                if self.filter_corrupted:
+                    print(f"Warning: Reference file not found: {ref_path}")
+                    return False
+        
+        # Ensure caption field exists (empty string if not provided)
+        if 'caption' not in item:
+            item['caption'] = ''
+        
+        return True
+    
+
+    def _prepare_samples(self) -> List[Dict]:
+        """Prepare samples with task-based distribution"""
+        # Separate samples by task
+        task_samples = {
+            'SONG': [],
+            'INST': [], 
+            'COVER': []
+        }
         
         for item in self.metadata:
+            task = item['task'].upper()
+            
             sample = {
                 'id': item['id'],
+                'task': task,
                 'audio_path': item['audio_path'],
                 'lyrics': item.get('lyrics', ''),
-                'caption': self._generate_caption(item),
+                'caption': item.get('caption', ''),
                 'genre': item.get('genre', ['unknown']),
-                'reference_path': item.get('reference_path'),  # For covers
+                'reference_path': item.get('reference_path'),
                 'metadata': item
             }
             
-            # Categorize by task capability
-            has_lyrics = bool(sample['lyrics'])
-            has_reference = bool(sample['reference_path'])
-            
-            if has_reference:
-                cover_samples.append(sample)
-            elif has_lyrics:
-                song_samples.append(sample)
+            if task in task_samples:
+                task_samples[task].append(sample)
             else:
-                inst_samples.append(sample)
-                
+                # Default to INST for unknown tasks
+                task_samples['INST'].append(sample)
+        
         # Balance according to task ratios
         total_samples = len(self.metadata)
-        target_song = int(total_samples * self.task_ratios.get('SONG', 0.6))
-        target_inst = int(total_samples * self.task_ratios.get('INST', 0.2))
-        target_cover = int(total_samples * self.task_ratios.get('COVER', 0.2))
+        balanced_samples = []
         
-        # Sample from each category
-        samples.extend(self._sample_category(song_samples, target_song, 'SONG'))
-        samples.extend(self._sample_category(inst_samples, target_inst, 'INST'))
-        samples.extend(self._sample_category(cover_samples, target_cover, 'COVER'))
+        for task, ratio in self.task_ratios.items():
+            available_samples = task_samples.get(task, [])
+            target_count = int(total_samples * ratio)
+            
+            if not available_samples:
+                continue
+            
+            if len(available_samples) >= target_count:
+                # Randomly sample
+                sampled = random.sample(available_samples, target_count)
+            else:
+                # Repeat samples to reach target
+                sampled = available_samples * (target_count // len(available_samples))
+                remaining = target_count % len(available_samples)
+                if remaining > 0:
+                    sampled.extend(random.sample(available_samples, remaining))
+            
+            balanced_samples.extend(sampled)
         
         # Shuffle final samples
-        random.shuffle(samples)
+        random.shuffle(balanced_samples)
         
-        return samples
+        return balanced_samples
     
-    def _sample_category(self, category_samples: List[Dict], target_count: int, task_type: str) -> List[Dict]:
-        """Sample from a category to reach target count"""
-        if not category_samples:
-            return []
-            
-        if len(category_samples) >= target_count:
-            # Randomly sample
-            sampled = random.sample(category_samples, target_count)
-        else:
-            # Repeat samples to reach target
-            sampled = category_samples * (target_count // len(category_samples))
-            remaining = target_count % len(category_samples)
-            if remaining > 0:
-                sampled.extend(random.sample(category_samples, remaining))
-                
-        # Add task type to each sample
-        for sample in sampled:
-            sample['task'] = task_type
-            
-        return sampled
-    
-    def _generate_caption(self, item: Dict) -> str:
-        """Generate MusicCaps-style caption from metadata"""
-        caption_parts = []
-        
-        # Genre information
-        genres = item.get('genre', [])
-        if genres and genres != ['unknown']:
-            if len(genres) == 1:
-                caption_parts.append(f"This is a {genres[0]} song")
-            else:
-                caption_parts.append(f"This is a {', '.join(genres[:-1])} and {genres[-1]} song")
-        else:
-            caption_parts.append("This is a music piece")
-            
-        # Tempo/mood (if available)
-        tempo = item.get('tempo')
-        if tempo:
-            if tempo > 140:
-                caption_parts.append("with a fast tempo")
-            elif tempo < 80:
-                caption_parts.append("with a slow tempo")
-            else:
-                caption_parts.append("with a moderate tempo")
-                
-        # Instruments (if available)
-        instruments = item.get('instruments', [])
-        if instruments:
-            if len(instruments) <= 3:
-                caption_parts.append(f"featuring {', '.join(instruments)}")
-            else:
-                caption_parts.append(f"featuring {', '.join(instruments[:3])} and other instruments")
-                
-        # Energy/mood
-        energy = item.get('energy', 0.5)
-        if energy > 0.7:
-            caption_parts.append("with high energy")
-        elif energy < 0.3:
-            caption_parts.append("with low energy")
-            
-        # Combine parts
-        if len(caption_parts) > 1:
-            caption = caption_parts[0] + " " + ", ".join(caption_parts[1:]) + "."
-        else:
-            caption = caption_parts[0] + "."
-            
-        return caption
+    def _get_task_distribution(self) -> Dict[str, int]:
+        """Get current task distribution"""
+        distribution = {}
+        for sample in self.samples:
+            task = sample['task']
+            distribution[task] = distribution.get(task, 0) + 1
+        return distribution
     
     def _preload_samples(self, count: int):
         """Preload some samples for faster access"""
@@ -325,7 +347,10 @@ class LyroDataset(Dataset):
             
         # Tokenize
         if hasattr(self.tokenizer, 'encode'):
-            token_ids = self.tokenizer.encode(text, max_length=self.max_text_length)
+            if text_type == 'lyrics':
+                token_ids = self.tokenizer.encode_lyrics(text)
+            else:
+                token_ids = self.tokenizer.encode_caption(text)
         else:
             # Fallback: character-level tokenization
             token_ids = [ord(c) % 1000 for c in text[:self.max_text_length]]
@@ -348,32 +373,37 @@ class LyroDataset(Dataset):
         return len(self.samples)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        """Get a single sample"""
+        """Get a single sample with task-specific processing"""
         if idx >= len(self.samples):
             idx = idx % len(self.samples)
             
         sample = self.samples[idx]
         
         try:
-            # Load and process audio
+            # Load and process main audio
             audio, sr = self._load_audio(sample['audio_path'], sample['id'])
             audio = self._process_audio(audio, sr)
             
-            # Process lyrics
-            lyrics_data = self._process_text(sample['lyrics'], 'lyrics')
+            # Process lyrics (only for SONG and some COVER tasks)
+            task = sample['task']
+            if task in ['SONG', 'COVER'] and sample['lyrics']:
+                lyrics_data = self._process_text(sample['lyrics'], 'lyrics')
+            else:
+                # Empty lyrics for INST tasks
+                lyrics_data = self._process_text('', 'lyrics')
             
-            # Process caption
+            # Process caption (all tasks have captions)
             caption_data = self._process_text(sample['caption'], 'caption')
             
-            # Load reference audio (for COVER task)
+            # Load reference audio (for COVER and optionally INST tasks)
             reference_audio = None
-            if sample['task'] == 'COVER' and sample.get('reference_path'):
+            if sample.get('reference_path'):
                 try:
                     ref_audio, ref_sr = self._load_audio(sample['reference_path'], f"{sample['id']}_ref")
                     reference_audio = self._process_audio(ref_audio, ref_sr)
-                except Exception:
-                    # Use same audio as reference if loading fails
-                    reference_audio = audio.clone()
+                except Exception as e:
+                    print(f"Warning: Failed to load reference audio: {e}")
+                    reference_audio = None
             
             return {
                 # Audio data
@@ -390,11 +420,11 @@ class LyroDataset(Dataset):
                 'caption_length': caption_data['length'],
                 
                 # Raw text for encoder processing
-                'lyrics_text': sample['lyrics'],
+                'lyrics_text': sample['lyrics'] if task in ['SONG', 'COVER'] else '',
                 'caption_text': sample['caption'],
                 
                 # Task and metadata
-                'task': sample['task'],
+                'task': task,
                 'genre': sample['genre'],
                 'id': sample['id'],
                 
@@ -437,7 +467,7 @@ def create_lyro_datasets(
     **kwargs
 ) -> Tuple[LyroDataset, LyroDataset, Optional[LyroDataset]]:
     """
-    Create train, validation, and test datasets
+    Create train, validation, and test datasets with task validation
     
     Args:
         train_metadata: Path to training metadata
