@@ -1,5 +1,6 @@
 """
-LYRO Generator 트레이너 (프리트레인된 DCAE 사용)
+LYRO Generator 트레이너 (올바른 DCAE + Vocoder 파이프라인)
+프리트레인된 DCAE + Vocoder를 사용한 Generator 훈련
 """
 
 import torch
@@ -25,6 +26,7 @@ from .utils import (
 from utils.metrics import MetricCalculator
 from utils.audio import AudioProcessor
 from models.losses import CombinedLoss
+from models.dcae import PretrainedDCAE, AdvancedVocoder
 
 warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
@@ -41,7 +43,10 @@ class TrainerState:
 
 
 class GeneratorTrainer:
-    """LYRO Generator 트레이너 (프리트레인된 DCAE 사용)"""
+    """
+    LYRO Generator 트레이너 (올바른 DCAE + Vocoder 파이프라인)
+    오디오 -> 멜 -> DCAE latent -> Generator 훈련 -> DCAE mel -> Vocoder -> 오디오
+    """
     
     def __init__(
         self,
@@ -49,7 +54,8 @@ class GeneratorTrainer:
         model: nn.Module,
         train_loader: DataLoader,
         val_loader: DataLoader,
-        dcae_model: nn.Module,
+        dcae_model: PretrainedDCAE,
+        vocoder_model: AdvancedVocoder,
         device: torch.device = None
     ):
         self.config = config
@@ -57,6 +63,7 @@ class GeneratorTrainer:
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.dcae_model = dcae_model
+        self.vocoder_model = vocoder_model
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # 상태
@@ -72,12 +79,15 @@ class GeneratorTrainer:
         self.train_metrics = TrainingMetrics()
         self.val_metrics = TrainingMetrics()
         
-        # 모델을 디바이스로 이동
+        # 모델들을 디바이스로 이동
         self.model = self.model.to(self.device)
         self.dcae_model = self.dcae_model.to(self.device).eval()
+        self.vocoder_model = self.vocoder_model.to(self.device).eval()
         
-        # DCAE 파라미터 고정
+        # DCAE 및 Vocoder 파라미터 고정
         for param in self.dcae_model.parameters():
+            param.requires_grad = False
+        for param in self.vocoder_model.parameters():
             param.requires_grad = False
         
         # 최적화 설정
@@ -99,8 +109,11 @@ class GeneratorTrainer:
         # 손실 함수
         self._setup_loss_function()
         
-        logger.info(f"Initialized GeneratorTrainer for {type(model).__name__}")
-        logger.info(f"Using pretrained DCAE: {type(dcae_model).__name__}")
+        logger.info(f"Initialized GeneratorTrainer with corrected DCAE+Vocoder pipeline")
+        logger.info(f"Generator: {type(model).__name__}")
+        logger.info(f"DCAE: {type(dcae_model).__name__} (frozen)")
+        logger.info(f"Vocoder: {type(vocoder_model).__name__} (frozen)")
+        logger.info(f"Pipeline: audio->mel->dcae_latent->generator->dcae_mel->vocoder->audio")
     
     def _setup_optimization(self):
         """최적화 설정"""
@@ -203,7 +216,9 @@ class GeneratorTrainer:
         return epoch_metrics
     
     def training_step(self, batch: Dict[str, Any]) -> Optional[Dict[str, float]]:
-        """Generator 훈련 스텝"""
+        """
+        Generator 훈련 스텝 (올바른 DCAE + Vocoder 파이프라인)
+        """
         # 배치를 디바이스로 이동
         batch = self._move_batch_to_device(batch)
         
@@ -212,10 +227,16 @@ class GeneratorTrainer:
         if audio is None:
             return None
         
-        # 프리트레인된 DCAE로 잠재 벡터 생성
+        # 올바른 파이프라인: 오디오 -> 멜 -> DCAE latent
         with torch.no_grad():
             try:
-                latents, _ = self.dcae_model.encode(audio)
+                # Step 1: 오디오 -> 멜 스펙트로그램
+                mel_target = self.dcae_model.audio_to_mel(audio.float())
+                
+                # Step 2: 멜 -> DCAE latent (target latents)
+                latents_target, _ = self.dcae_model.encode_mel(mel_target.float())
+                latents_target = latents_target.half() if self.scaler else latents_target
+                
             except Exception as e:
                 logger.error(f"DCAE encoding failed: {e}")
                 return None
@@ -225,80 +246,106 @@ class GeneratorTrainer:
         lyrics_mask = batch.get('lyrics_mask')
         captions = batch.get('captions')
         reference_audio = batch.get('reference_audio')
-        task_types = batch.get('task_types', ['SONG'] * latents.shape[0])
+        task_types = batch.get('task_types', ['SONG'] * latents_target.shape[0])
+        
+        # 참조 오디오 처리 (올바른 파이프라인)
+        reference_latents = None
+        if reference_audio is not None:
+            with torch.no_grad():
+                try:
+                    ref_mel = self.dcae_model.audio_to_mel(reference_audio.float())
+                    reference_latents, _ = self.dcae_model.encode_mel(ref_mel.float())
+                    reference_latents = reference_latents.half() if self.scaler else reference_latents
+                except Exception as e:
+                    logger.warning(f"Reference audio processing failed: {e}")
+                    reference_latents = None
         
         # 그래디언트 누적 여부 확인
         accumulate_grad = (
             self.state.step % self.config.generator.gradient_accumulation_steps != 0
         )
         
-        # 포워드 패스
+        # Generator 훈련 (Flow Matching)
         if self.scaler:
             with autocast():
                 loss_dict = self.model.training_loss(
-                    latents=latents,
+                    latents=latents_target.float(),
                     lyrics=lyrics,
                     lyrics_mask=lyrics_mask,
                     captions=captions,
-                    reference_audio=reference_audio,
+                    reference_audio=reference_latents.float() if reference_latents is not None else None,
                     task_type=task_types[0] if task_types else 'SONG'
                 )
         else:
             loss_dict = self.model.training_loss(
-                latents=latents,
+                latents=latents_target.float(),
                 lyrics=lyrics,
                 lyrics_mask=lyrics_mask,
                 captions=captions,
-                reference_audio=reference_audio,
+                reference_audio=reference_latents.float() if reference_latents is not None else None,
                 task_type=task_types[0] if task_types else 'SONG'
             )
         
         if not loss_dict or 'flow_loss' not in loss_dict:
             return None
         
-        # 기본 flow loss 사용
-        total_loss = loss_dict['flow_loss']
+        # 기본 flow loss
+        flow_loss = loss_dict['flow_loss']
         
-        # 추가 손실 계산 (REPA, perceptual 등)
+        # 추가 손실 계산 (REPA, perceptual 등) - 올바른 파이프라인 사용
+        additional_losses = {}
         try:
-            # 간단한 생성으로 오디오 복원
-            with torch.no_grad():
-                predicted_v = loss_dict.get('predicted_v')
-                if predicted_v is not None:
-                    # 한 스텝 생성
-                    generated_latents = latents + 0.1 * predicted_v
-                    generated_audio = self.dcae_model.decode(generated_latents)
+            predicted_v = loss_dict.get('predicted_v')
+            target_v = loss_dict.get('target_v')
+            
+            if predicted_v is not None and target_v is not None:
+                # 생성된 latent로부터 오디오 복원 (올바른 파이프라인)
+                with torch.no_grad():
+                    # 한 스텝 Flow Matching 근사
+                    generated_latents = latents_target + 0.1 * predicted_v
                     
-                    # 추가 손실들 계산
-                    additional_losses = self.loss_fn(
-                        predicted_v=predicted_v,
-                        target_v=loss_dict.get('target_v', torch.zeros_like(predicted_v)),
-                        predicted_audio=generated_audio,
-                        target_audio=audio,
-                        t=torch.rand(latents.shape[0], device=self.device)
-                    )
+                    # latent -> mel (DCAE 디코딩)
+                    generated_mel = self.dcae_model.decode_to_mel(generated_latents.float())
                     
-                    # 전체 손실에 추가
-                    total_loss = total_loss + 0.1 * additional_losses['total']
-                    
-                    result_dict = {
-                        'loss': total_loss,
-                        'flow_loss': loss_dict['flow_loss'],
-                        'repa_loss': additional_losses.get('repa', torch.tensor(0.0)),
-                        'recon_loss': additional_losses.get('recon', torch.tensor(0.0)),
-                        'perceptual_loss': additional_losses.get('perceptual', torch.tensor(0.0))
-                    }
-                else:
-                    result_dict = {
-                        'loss': total_loss,
-                        'flow_loss': loss_dict['flow_loss']
-                    }
-                    
+                    # mel -> audio (Vocoder)
+                    generated_audio = self.vocoder_model.mel_to_audio(generated_mel)
+                
+                # 추가 손실들 계산
+                additional_losses = self.loss_fn(
+                    predicted_v=predicted_v,
+                    target_v=target_v,
+                    predicted_audio=generated_audio.float(),
+                    target_audio=audio.float(),
+                    t=torch.rand(latents_target.shape[0], device=self.device)
+                )
+                
+                # 전체 손실
+                total_loss = flow_loss + 0.1 * additional_losses['total']
+                
+                result_dict = {
+                    'loss': total_loss,
+                    'flow_loss': flow_loss,
+                    'repa_loss': additional_losses.get('repa', torch.tensor(0.0)),
+                    'recon_loss': additional_losses.get('recon', torch.tensor(0.0)),
+                    'perceptual_loss': additional_losses.get('perceptual', torch.tensor(0.0))
+                }
+            else:
+                result_dict = {
+                    'loss': flow_loss,
+                    'flow_loss': flow_loss,
+                    'repa_loss': torch.tensor(0.0),
+                    'recon_loss': torch.tensor(0.0),
+                    'perceptual_loss': torch.tensor(0.0)
+                }
+                
         except Exception as e:
             logger.warning(f"Additional loss calculation failed: {e}")
             result_dict = {
-                'loss': total_loss,
-                'flow_loss': loss_dict['flow_loss']
+                'loss': flow_loss,
+                'flow_loss': flow_loss,
+                'repa_loss': torch.tensor(0.0),
+                'recon_loss': torch.tensor(0.0),
+                'perceptual_loss': torch.tensor(0.0)
             }
         
         # 손실 정규화 (그래디언트 누적)
@@ -378,16 +425,21 @@ class GeneratorTrainer:
         return val_metrics
     
     def validation_step(self, batch: Dict[str, Any]) -> Optional[Dict[str, float]]:
-        """검증 스텝"""
+        """검증 스텝 (올바른 파이프라인)"""
         audio = batch.get('audio')
         if audio is None:
             return None
         
-        # 프리트레인된 DCAE로 잠재 벡터 생성
+        # 올바른 파이프라인: 오디오 -> 멜 -> DCAE latent
         try:
-            latents, _ = self.dcae_model.encode(audio)
+            # Step 1: 오디오 -> 멜
+            mel_target = self.dcae_model.audio_to_mel(audio.float())
+            
+            # Step 2: 멜 -> DCAE latent
+            latents_target, _ = self.dcae_model.encode_mel(mel_target.float())
+            
         except Exception as e:
-            logger.error(f"DCAE encoding failed: {e}")
+            logger.error(f"DCAE encoding failed during validation: {e}")
             return None
         
         # 조건들 준비
@@ -395,15 +447,24 @@ class GeneratorTrainer:
         lyrics_mask = batch.get('lyrics_mask')
         captions = batch.get('captions')
         reference_audio = batch.get('reference_audio')
-        task_types = batch.get('task_types', ['SONG'] * latents.shape[0])
+        task_types = batch.get('task_types', ['SONG'] * latents_target.shape[0])
+        
+        # 참조 오디오 처리
+        reference_latents = None
+        if reference_audio is not None:
+            try:
+                ref_mel = self.dcae_model.audio_to_mel(reference_audio.float())
+                reference_latents, _ = self.dcae_model.encode_mel(ref_mel.float())
+            except Exception:
+                reference_latents = None
         
         # Generator 검증
         loss_dict = self.model.training_loss(
-            latents=latents,
+            latents=latents_target.float(),
             lyrics=lyrics,
             lyrics_mask=lyrics_mask,
             captions=captions,
-            reference_audio=reference_audio,
+            reference_audio=reference_latents.float() if reference_latents is not None else None,
             task_type=task_types[0] if task_types else 'SONG'
         )
         
@@ -417,7 +478,10 @@ class GeneratorTrainer:
     
     def train(self):
         """메인 훈련 루프"""
-        logger.info("Starting Generator training...")
+        logger.info("Starting Generator training with corrected DCAE+Vocoder pipeline...")
+        
+        # 파이프라인 테스트
+        self._test_pipeline()
         
         # 모델 정보 로깅
         self.logging_manager.log_model_info(self.model)
@@ -472,8 +536,38 @@ class GeneratorTrainer:
                 train_only_metrics = {f'train_{k}': v for k, v in train_metrics.items()}
                 self.logging_manager.log_metrics(train_only_metrics, self.state.step)
         
-        logger.info("Generator training completed!")
+        logger.info("Generator training completed with corrected pipeline!")
         return self.state.last_checkpoint_path
+    
+    def _test_pipeline(self):
+        """파이프라인 올바른 동작 테스트"""
+        logger.info("Testing corrected DCAE+Vocoder pipeline...")
+        
+        try:
+            # 테스트 오디오 생성
+            test_audio = torch.randn(1, 2, 44100, device=self.device)
+            
+            # Step 1: 오디오 -> 멜
+            mel = self.dcae_model.audio_to_mel(test_audio)
+            logger.info(f"  Audio -> Mel: {test_audio.shape} -> {mel.shape}")
+            
+            # Step 2: 멜 -> DCAE latent
+            latents, _ = self.dcae_model.encode_mel(mel)
+            logger.info(f"  Mel -> Latent: {mel.shape} -> {latents.shape}")
+            
+            # Step 3: DCAE latent -> 멜
+            reconstructed_mel = self.dcae_model.decode_to_mel(latents)
+            logger.info(f"  Latent -> Mel: {latents.shape} -> {reconstructed_mel.shape}")
+            
+            # Step 4: 멜 -> 오디오
+            reconstructed_audio = self.vocoder_model.mel_to_audio(reconstructed_mel)
+            logger.info(f"  Mel -> Audio: {reconstructed_mel.shape} -> {reconstructed_audio.shape}")
+            
+            logger.info("✅ Pipeline test completed successfully!")
+            
+        except Exception as e:
+            logger.error(f"❌ Pipeline test failed: {e}")
+            raise RuntimeError("Pipeline test failed - check DCAE and Vocoder configuration")
     
     def _move_batch_to_device(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         """배치를 디바이스로 이동"""
@@ -494,6 +588,8 @@ class GeneratorTrainer:
         log_str = (
             f"Epoch {self.state.epoch}, Step {batch_idx}: "
             f"loss={step_result.get('loss', 0):.4f}, "
+            f"flow={step_result.get('flow_loss', 0):.4f}, "
+            f"repa={step_result.get('repa_loss', 0):.4f}, "
             f"lr={step_result.get('learning_rate', 0):.2e}, "
             f"time={step_time:.2f}s"
         )
@@ -530,11 +626,12 @@ def create_trainer(
     model: nn.Module,
     train_loader: DataLoader,
     val_loader: DataLoader,
-    dcae_model: nn.Module,
+    dcae_model: PretrainedDCAE,
+    vocoder_model: AdvancedVocoder,
     device: Optional[torch.device] = None
 ) -> GeneratorTrainer:
     """
-    Generator 트레이너 생성
+    Generator 트레이너 생성 (올바른 DCAE + Vocoder 파이프라인)
     
     Args:
         config: 설정
@@ -542,6 +639,7 @@ def create_trainer(
         train_loader: 훈련 데이터 로더
         val_loader: 검증 데이터 로더
         dcae_model: 프리트레인된 DCAE 모델
+        vocoder_model: 프리트레인된 Vocoder 모델
         device: 디바이스
     
     Returns:
@@ -556,5 +654,6 @@ def create_trainer(
         train_loader=train_loader,
         val_loader=val_loader,
         dcae_model=dcae_model,
+        vocoder_model=vocoder_model,
         device=device
     )
