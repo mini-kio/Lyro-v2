@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # lyro/scripts/train_generator.py
 """
-LYRO Generator 훈련 스크립트 - 1.5B 파라미터 모델
-SSM + Flow Matching + REPA Loss
+LYRO Generator 훈련 스크립트 (프리트레인된 DCAE 사용)
+1.5B 파라미터 SSM + Flow Matching + REPA Loss
 """
 
 import os
@@ -19,13 +19,14 @@ import time
 # 프로젝트 루트 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lyro.models.generator import create_lyro_generator, GeneratorConfig
-from lyro.models.dcae import create_dcae
+from lyro.models.ssm_flow import create_ssm_flow_generator
+from lyro.models.dcae import create_dcae_model
 from lyro.models.losses import CombinedLoss, FlowMatchingLoss, REPALoss, ReconstructionLoss, PerceptualLoss
 from lyro.data.dataset import create_lyro_datasets
 from lyro.data.collator import LyroCollator
 from lyro.data.tokenizer import LyroTokenizer
 from lyro.training.config import LyroConfig
+from lyro.training.trainer import create_trainer
 from lyro.utils import get_audio_processor
 
 logging.basicConfig(level=logging.INFO)
@@ -33,22 +34,22 @@ logger = logging.getLogger(__name__)
 
 
 class LyroGeneratorTrainer:
-    """LYRO Generator 트레이너 (1.5B 파라미터)"""
+    """LYRO Generator 트레이너 (프리트레인된 DCAE 사용)"""
     
-    def __init__(self, config: LyroConfig, dcae_checkpoint: str = None):
+    def __init__(self, config: LyroConfig):
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # DCAE 모델 로드 (frozen)
-        self.dcae_model = self._load_dcae(dcae_checkpoint)
+        # 프리트레인된 DCAE 모델 로드 (훈련하지 않음)
+        self.dcae_model = self._load_pretrained_dcae()
         
-        # Generator 모델 생성 (1.5B 파라미터)
+        # Generator 모델 생성 (1.5B 파라미터, 훈련 대상)
         self.generator_model = self._create_generator()
         
         # 손실 함수 (REPA Loss 포함)
         self.loss_fn = self._create_loss_function()
         
-        # 옵티마이저 및 스케줄러
+        # 옵티마이저 및 스케줄러 (Generator만)
         self.optimizer = torch.optim.AdamW(
             self.generator_model.parameters(),
             lr=config.generator.learning_rate,
@@ -73,59 +74,39 @@ class LyroGeneratorTrainer:
         )
         
         logger.info(f"LYRO Generator Trainer initialized on {self.device}")
-        logger.info(f"Generator parameters: {self.generator_model.count_parameters():,}")
+        logger.info(f"Generator parameters: {self._count_parameters(self.generator_model):,}")
+        logger.info(f"DCAE parameters (frozen): {self._count_parameters(self.dcae_model):,}")
     
-    def _load_dcae(self, checkpoint_path: str = None):
-        """DCAE 모델 로드"""
-        dcae_model = create_dcae(
-            sample_rate=self.config.dcae.sample_rate,
-            latent_channels=self.config.dcae.latent_channels,
-            target_compression_ratio=self.config.dcae.estimate_compression_ratio()
+    def _load_pretrained_dcae(self):
+        """프리트레인된 DCAE 모델 로드"""
+        dcae_model = create_dcae_model(
+            model_type="pretrained",
+            model_name=self.config.dcae.model_name,
+            cache_dir=self.config.dcae.cache_dir
         ).to(self.device).eval()
-        
-        # 체크포인트 로드
-        if checkpoint_path and Path(checkpoint_path).exists():
-            checkpoint = torch.load(checkpoint_path, map_location=self.device)
-            dcae_model.load_state_dict(checkpoint['model_state_dict'])
-            logger.info(f"Loaded DCAE from {checkpoint_path}")
-        else:
-            logger.warning("No DCAE checkpoint provided, using random weights")
         
         # 파라미터 고정
         for param in dcae_model.parameters():
             param.requires_grad = False
         
+        logger.info(f"Loaded pretrained DCAE: {self.config.dcae.model_name}")
         return dcae_model
     
     def _create_generator(self):
         """1.5B 파라미터 Generator 생성"""
-        generator_config = GeneratorConfig(
-            # 1.5B 파라미터 타겟
-            d_model=1536,
-            n_layers=24,
-            n_heads=24,
-            d_ff=6144,
-            
-            # SSM 설정
-            d_state=64,
-            d_conv=4,
-            expand_factor=2,
-            
-            # 입출력 설정
-            latent_channels=self.config.dcae.latent_channels,
-            latent_time_steps=self.config.dcae.target_time_steps,
-            
-            # Flow Matching 설정
-            flow_steps=50,
-            sigma_min=1e-4,
-            sigma_max=1.0,
-            cfg_scale=7.5,
-            
-            # 기타
+        generator = create_ssm_flow_generator(
+            latent_channels=self.config.generator.latent_channels,
+            latent_size=self.config.generator.latent_time_steps,
+            d_model=self.config.generator.d_model,
+            n_layers=self.config.generator.n_layers,
+            d_state=self.config.generator.d_state,
+            condition_dims={
+                'lyrics': self.config.encoder.lyrics_embed_dim,
+                'caption': self.config.encoder.caption_embed_dim,
+                'reference': self.config.generator.latent_channels * self.config.generator.latent_time_steps
+            },
             dropout=0.1
-        )
-        
-        generator = create_lyro_generator(generator_config).to(self.device)
+        ).to(self.device)
         
         # FP16으로 변환
         generator = generator.half()
@@ -140,11 +121,11 @@ class LyroGeneratorTrainer:
             num_timesteps=1000
         )
         
-        # REPA Loss (ZhenYe234/hubert_base_general_audio)
+        # REPA Loss (HuBERT 기반)
         repa_loss = REPALoss(
-            hubert_model="ZhenYe234/hubert_base_general_audio",
-            sample_rate=self.config.dcae.sample_rate,
-            layer_weights=[0.1, 0.2, 0.3, 0.3, 0.1]  # 중간 레이어 강조
+            hubert_model=self.config.loss.hubert_model,
+            sample_rate=self.config.data.sample_rate,
+            layer_weights=self.config.loss.hubert_layers
         )
         
         recon_loss = ReconstructionLoss(
@@ -154,9 +135,9 @@ class LyroGeneratorTrainer:
         )
         
         perceptual_loss = PerceptualLoss(
-            sample_rate=self.config.dcae.sample_rate,
-            mel_weight=1.0,
-            stft_weight=0.5
+            sample_rate=self.config.data.sample_rate,
+            mel_weight=self.config.loss.mel_weight,
+            stft_weight=self.config.loss.stft_weight
         )
         
         # 결합 손실
@@ -166,14 +147,18 @@ class LyroGeneratorTrainer:
             recon_loss=recon_loss,
             perceptual_loss=perceptual_loss,
             weights={
-                'flow': 1.0,        # Flow Matching Loss
-                'repa': 0.1,        # REPA Loss (HuBERT 기반)
-                'recon': 0.3,       # Reconstruction Loss
-                'perceptual': 0.2   # Perceptual Loss
+                'flow': self.config.loss.flow_matching_weight,
+                'repa': self.config.loss.repa_weight,
+                'recon': self.config.loss.reconstruction_weight,
+                'perceptual': self.config.loss.perceptual_weight
             }
         )
         
         return combined_loss
+    
+    def _count_parameters(self, model):
+        """모델 파라미터 수 계산"""
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
     
     def train_step(self, batch):
         """훈련 스텝"""
@@ -184,7 +169,7 @@ class LyroGeneratorTrainer:
         captions = batch.get('captions')
         task_types = batch.get('task_types', ['SONG'] * audio.shape[0])
         
-        # DCAE로 잠재 벡터 인코딩
+        # 프리트레인된 DCAE로 잠재 벡터 인코딩
         with torch.no_grad():
             try:
                 latents, _ = self.dcae_model.encode(audio.float())
@@ -270,7 +255,7 @@ class LyroGeneratorTrainer:
         task_types = batch.get('task_types', ['SONG'] * audio.shape[0])
         
         with torch.no_grad():
-            # DCAE 인코딩
+            # 프리트레인된 DCAE 인코딩
             latents, _ = self.dcae_model.encode(audio.float())
             latents = latents.half()
             
@@ -291,19 +276,22 @@ class LyroGeneratorTrainer:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='LYRO Generator Training (1.5B Parameters)')
+    parser = argparse.ArgumentParser(description='LYRO Generator Training (with Pretrained DCAE)')
     
     # 기본 설정
     parser.add_argument('--config', type=str, default=None, help='Config file path')
     parser.add_argument('--dataset_root', type=str, default='dataset', help='Dataset root directory')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints/generator', help='Checkpoint directory')
-    parser.add_argument('--dcae_checkpoint', type=str, required=True, help='DCAE checkpoint path')
     
     # 훈련 설정
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=2, help='Batch size (small for 1.5B model)')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--audio_duration', type=float, default=5.0, help='Audio duration in seconds')
+    parser.add_argument('--audio_duration', type=float, default=10.0, help='Audio duration in seconds')
+    
+    # 프리트레인된 DCAE 설정
+    parser.add_argument('--dcae_model_name', type=str, default='ACE-Step/ACE-Step-v1-3.5B', help='Pretrained DCAE model name')
+    parser.add_argument('--dcae_cache_dir', type=str, default='checkpoints', help='DCAE cache directory')
     
     # 기술적 설정
     parser.add_argument('--gradient_accumulation_steps', type=int, default=8, help='Gradient accumulation steps')
@@ -319,11 +307,13 @@ def main():
         config.generator.epochs = args.epochs
         config.generator.batch_size = args.batch_size
         config.generator.learning_rate = args.learning_rate
-        config.dcae.audio_duration = args.audio_duration
+        config.data.audio_duration = args.audio_duration
         config.training.checkpoint_dir = args.checkpoint_dir
+        config.dcae.model_name = args.dcae_model_name
+        config.dcae.cache_dir = args.dcae_cache_dir
     
-    logger.info("Starting LYRO Generator Training (1.5B Parameters)")
-    logger.info(f"DCAE checkpoint: {args.dcae_checkpoint}")
+    logger.info("Starting LYRO Generator Training (with Pretrained DCAE)")
+    logger.info(f"Pretrained DCAE: {config.dcae.model_name}")
     
     # 토크나이저
     tokenizer = LyroTokenizer(vocab_size=32000)
@@ -335,7 +325,7 @@ def main():
         test_metadata=None,
         dataset_root=args.dataset_root,
         tokenizer=tokenizer,
-        max_audio_length=int(config.dcae.sample_rate * config.dcae.audio_duration),
+        max_audio_length=int(config.data.sample_rate * config.data.audio_duration),
         task_ratios={'SONG': 0.6, 'INST': 0.3, 'COVER': 0.1}
     )
     
@@ -344,7 +334,7 @@ def main():
     # 콜레이터
     collator = LyroCollator(
         tokenizer=tokenizer,
-        max_audio_length=int(config.dcae.sample_rate * config.dcae.audio_duration),
+        max_audio_length=int(config.data.sample_rate * config.data.audio_duration),
         max_text_length=512
     )
     
@@ -369,7 +359,7 @@ def main():
     )
     
     # 트레이너 생성
-    trainer = LyroGeneratorTrainer(config, args.dcae_checkpoint)
+    trainer = LyroGeneratorTrainer(config)
     
     # 체크포인트 디렉토리 생성
     checkpoint_dir = Path(config.training.checkpoint_dir)

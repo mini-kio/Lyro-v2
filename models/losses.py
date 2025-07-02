@@ -1,7 +1,7 @@
 # lyro/models/losses.py
 """
-Loss Functions for LYRO
-Includes Flow Matching, REPA (HuBERT), Reconstruction, and Perceptual losses
+Generator Loss Functions for LYRO (DCAE 관련 손실 제거)
+Flow Matching, REPA (HuBERT), Reconstruction, Perceptual losses만 포함
 """
 
 import torch
@@ -438,66 +438,8 @@ class PerceptualLoss(nn.Module):
         return total_loss if total_loss > 0 else torch.tensor(0.1, device=device, requires_grad=True)
 
 
-class AdversarialLoss(nn.Module):
-    """Adversarial loss for improved quality"""
-    
-    def __init__(self):
-        super().__init__()
-        
-        # Simple discriminator
-        self.discriminator = nn.Sequential(
-            nn.Conv1d(2, 32, 15, stride=1, padding=7),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(32, 64, 41, stride=4, padding=20, groups=4),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(64, 128, 41, stride=4, padding=20, groups=16),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(128, 256, 41, stride=4, padding=20, groups=64),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(256, 512, 5, stride=1, padding=2),
-            nn.LeakyReLU(0.2),
-            nn.AdaptiveAvgPool1d(1),
-            nn.Flatten(),
-            nn.Linear(512, 1)
-        )
-        
-    def forward(self, predicted: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Compute adversarial loss
-        
-        Args:
-            predicted: (B, 2, T) predicted audio
-            target: (B, 2, T) target audio
-            
-        Returns:
-            generator_loss, discriminator_loss
-        """
-        # Discriminator scores
-        real_score = self.discriminator(target.detach())
-        fake_score = self.discriminator(predicted)
-        
-        # Generator loss (fool discriminator)
-        gen_loss = F.binary_cross_entropy_with_logits(
-            fake_score, 
-            torch.ones_like(fake_score)
-        )
-        
-        # Discriminator loss
-        real_loss = F.binary_cross_entropy_with_logits(
-            real_score,
-            torch.ones_like(real_score)
-        )
-        fake_loss = F.binary_cross_entropy_with_logits(
-            fake_score.detach(),
-            torch.zeros_like(fake_score)
-        )
-        disc_loss = (real_loss + fake_loss) / 2
-        
-        return gen_loss, disc_loss
-
-
 class CombinedLoss(nn.Module):
-    """Combined loss function for LYRO training"""
+    """Combined loss function for LYRO Generator training"""
     
     def __init__(
         self,
@@ -523,10 +465,6 @@ class CombinedLoss(nn.Module):
                 'perceptual': 0.2
             }
         self.weights = weights
-        
-        # Adversarial loss (optional)
-        self.adversarial_loss = AdversarialLoss()
-        self.use_adversarial = False
         
     def forward(
         self,
@@ -569,12 +507,6 @@ class CombinedLoss(nn.Module):
         perceptual_loss = self.perceptual_loss(predicted_audio, target_audio)
         losses['perceptual'] = perceptual_loss
         
-        # Adversarial loss (if enabled)
-        if self.use_adversarial:
-            gen_loss, disc_loss = self.adversarial_loss(predicted_audio, target_audio)
-            losses['adversarial_gen'] = gen_loss
-            losses['adversarial_disc'] = disc_loss
-        
         # Compute total loss
         total_loss = (
             self.weights.get('flow', 1.0) * flow_loss +
@@ -582,18 +514,11 @@ class CombinedLoss(nn.Module):
             self.weights.get('recon', 0.5) * recon_loss +
             self.weights.get('perceptual', 0.2) * perceptual_loss
         )
-        
-        if self.use_adversarial:
-            total_loss += self.weights.get('adversarial', 0.01) * gen_loss
             
         losses['total'] = total_loss
         
         return losses
     
-    def enable_adversarial(self, enable: bool = True):
-        """Enable/disable adversarial training"""
-        self.use_adversarial = enable
-        
     def update_weights(self, new_weights: Dict[str, float]):
         """Update loss weights"""
         self.weights.update(new_weights)

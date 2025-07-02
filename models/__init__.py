@@ -1,10 +1,9 @@
 # lyro/models/__init__.py
 """
-LYRO Models Package
-Unified model factory and imports
+LYRO Models Package (프리트레인된 DCAE + Generator 훈련)
 """
 
-from .dcae import DCAE, create_dcae
+from .dcae import PretrainedDCAE, create_dcae_model
 from .ssm_flow import SSMFlowGenerator, create_ssm_flow_generator
 from .encoders import CaptionEncoder, LyricsEncoder, ReferenceEncoder
 from .losses import (
@@ -16,16 +15,20 @@ from .losses import (
 )
 
 __all__ = [
-    # Models
-    'DCAE',
+    # Pretrained DCAE
+    'PretrainedDCAE',
+    'create_dcae_model',
+    
+    # Generator
     'SSMFlowGenerator',
+    'create_ssm_flow_generator',
     
     # Encoders
     'CaptionEncoder',
     'LyricsEncoder', 
     'ReferenceEncoder',
     
-    # Losses
+    # Losses (Generator용)
     'FlowMatchingLoss',
     'REPALoss',
     'ReconstructionLoss',
@@ -33,48 +36,49 @@ __all__ = [
     'CombinedLoss',
     
     # Factory functions
-    'create_dcae',
-    'create_ssm_flow_generator',
     'create_lyro_models',
 ]
 
 
 def create_lyro_models(config):
     """
-    Create complete LYRO model suite
+    LYRO 모델 스위트 생성 (프리트레인된 DCAE + 훈련할 Generator)
     
     Args:
-        config: Model configuration
+        config: 모델 설정
         
     Returns:
-        dict: Dictionary containing all models
+        dict: 모델 딕셔너리
     """
     models = {}
     
-    # DCAE for audio encoding/decoding
-    models['dcae'] = create_dcae(
-        latent_channels=config.dcae.latent_channels,
-        sample_rate=config.dcae.sample_rate,
-        **config.dcae.model_kwargs
+    # 프리트레인된 DCAE (훈련하지 않음)
+    models['dcae'] = create_dcae_model(
+        model_name=config.dcae.model_name,
+        subfolder=config.dcae.subfolder,
+        cache_dir=config.dcae.cache_dir,
+        sample_rate=config.dcae.sample_rate
     )
     
-    # SSM + Flow matching generator
+    # Generator (SSM + Flow Matching, 훈련 대상)
     models['generator'] = create_ssm_flow_generator(
-        latent_channels=config.ssm.latent_channels,
-        condition_dim=config.ssm.condition_dim,
-        **config.ssm.model_kwargs
+        latent_channels=config.generator.latent_channels,
+        latent_size=config.generator.latent_time_steps,
+        d_model=config.generator.d_model,
+        n_layers=config.generator.n_layers,
+        d_state=config.generator.d_state
     )
     
-    # Condition encoders
+    # 조건 인코더들
     models['caption_encoder'] = CaptionEncoder(
-        model_name=config.encoders.caption_model,
-        output_dim=config.encoders.caption_dim
+        model_name=config.encoder.caption_model,
+        output_dim=config.encoder.caption_embed_dim
     )
     
     models['lyrics_encoder'] = LyricsEncoder(
-        vocab_size=config.encoders.vocab_size,
-        embed_dim=config.encoders.lyrics_dim,
-        max_length=config.encoders.max_lyrics_length
+        vocab_size=config.encoder.lyrics_vocab_size,
+        embed_dim=config.encoder.lyrics_embed_dim,
+        max_length=config.encoder.max_lyrics_length
     )
     
     models['reference_encoder'] = ReferenceEncoder(
@@ -84,32 +88,31 @@ def create_lyro_models(config):
     return models
 
 
-def create_loss_functions(config, models):
+def create_loss_functions(config):
     """
-    Create all loss functions
+    Generator용 손실 함수 생성
     
     Args:
-        config: Loss configuration
-        models: Model dictionary
+        config: 손실 설정
         
     Returns:
-        CombinedLoss: Combined loss function
+        CombinedLoss: 결합 손실 함수
     """
     
-    # Individual loss components
+    # 개별 손실 컴포넌트들
     flow_loss = FlowMatchingLoss(
-        beta_schedule=config.loss.beta_schedule,
-        num_timesteps=config.loss.num_timesteps
+        beta_schedule="cosine",
+        num_timesteps=1000
     )
     
     repa_loss = REPALoss(
         hubert_model=config.loss.hubert_model,
-        layer_weights=config.loss.repa_layer_weights
+        layer_weights=config.loss.hubert_layers
     )
     
     recon_loss = ReconstructionLoss(
-        l1_weight=config.loss.l1_weight,
-        l2_weight=config.loss.l2_weight
+        l1_weight=1.0,
+        l2_weight=0.1
     )
     
     perceptual_loss = PerceptualLoss(
@@ -117,35 +120,43 @@ def create_loss_functions(config, models):
         stft_weight=config.loss.stft_weight
     )
     
-    # Combined loss
+    # 결합 손실
     combined_loss = CombinedLoss(
         flow_loss=flow_loss,
         repa_loss=repa_loss,
         recon_loss=recon_loss,
         perceptual_loss=perceptual_loss,
-        weights=config.loss.weights
+        weights={
+            'flow': config.loss.flow_matching_weight,
+            'repa': config.loss.repa_weight,
+            'recon': config.loss.reconstruction_weight,
+            'perceptual': config.loss.perceptual_weight
+        }
     )
     
     return combined_loss
 
 
 def get_model_info():
-    """Get model architecture information"""
+    """모델 아키텍처 정보"""
     return {
         'dcae': {
-            'parameters': '~100M',
+            'type': 'Pretrained ACE-Step',
+            'model_name': 'ACE-Step/ACE-Step-v1-3.5B',
             'latent_channels': 16,
-            'compression_ratio': '~50:1'
+            'compression_ratio': '~50:1',
+            'trainable': False
         },
         'ssm_generator': {
-            'parameters': '~1.4B', 
+            'parameters': '~1.5B', 
             'architecture': 'S6 + Flow Matching',
-            'conditions': ['lyrics', 'captions', 'reference']
+            'conditions': ['lyrics', 'captions', 'reference'],
+            'trainable': True
         },
         'encoders': {
             'caption': 'Pretrained Text Encoder',
             'lyrics': 'Custom Tokenizer + Embedding',
             'reference': 'DCAE-based'
         },
-        'total_parameters': '~1.5B'
+        'total_trainable_parameters': '~1.5B'
     }
