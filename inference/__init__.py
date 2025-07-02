@@ -7,9 +7,7 @@ LYRO 추론 패키지
 from .pipeline import (
     LyroPipeline,
     GenerationConfig,
-    GenerationInput,
-    StreamingPipeline,
-    create_pipeline_from_config
+    GenerationInput
 )
 
 from .generator import (
@@ -23,8 +21,7 @@ __all__ = [
     'LyroPipeline',
     'GenerationConfig', 
     'GenerationInput',
-    'StreamingPipeline',
-    'create_pipeline_from_config',
+    'create_simple_pipeline',
     
     # Generators
     'LyroGenerator',
@@ -39,7 +36,7 @@ def create_simple_pipeline(
     device: str = "auto"
 ):
     """간단한 파이프라인 생성 헬퍼"""
-    from ..training.config import LyroConfig
+    from training.config import LyroConfig
     
     # 기본 설정
     config = LyroConfig()

@@ -1,4 +1,3 @@
-# lyro/inference/pipeline.py
 """
 LYRO 통합 추론 파이프라인
 DCAE + Generator + CFG 샘플링을 통합한 완전한 음악 생성 시스템
@@ -15,12 +14,12 @@ import logging
 import time
 import warnings
 
-from ..models.dcae import PretrainedDCAE, create_dcae_model
-from ..models.generator import LyroGenerator, GeneratorConfig, create_lyro_generator
-from ..models.sampling import FlowMatchingSampler
-from ..data.processor import DataProcessor, ProcessorConfig
-from ..utils.audio import AudioProcessor
-from ..utils.metrics import MetricCalculator
+from models.dcae import PretrainedDCAE, create_dcae_model
+from models.generator import LyroGenerator, GeneratorConfig, create_lyro_generator
+from models.sampling import FlowMatchingSampler
+from data.processor import DataProcessor, ProcessorConfig
+from utils.audio import AudioProcessor
+from utils.metrics import MetricCalculator
 
 warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
@@ -136,7 +135,7 @@ class LyroPipeline:
         
         # Generator 로드
         if generator_checkpoint and Path(generator_checkpoint).exists():
-            from ..models.generator import load_pretrained_generator
+            from models.generator import load_pretrained_generator
             generator_model = load_pretrained_generator(generator_checkpoint, device=device)
         else:
             # 새로운 Generator 생성
@@ -270,9 +269,13 @@ class LyroPipeline:
         if input_data.reference_audio:
             reference_tensor = self._load_reference_audio(input_data.reference_audio)
             if reference_tensor is not None:
-                # DCAE로 인코딩
+                # DCAE로 인코딩 - batch dimension 확인
                 with torch.no_grad():
-                    ref_latents, _ = self.dcae_model.encode(reference_tensor.unsqueeze(0))
+                    if reference_tensor.dim() == 1:
+                        reference_tensor = reference_tensor.unsqueeze(0).unsqueeze(0)  # (1, 1, T)
+                    elif reference_tensor.dim() == 2:
+                        reference_tensor = reference_tensor.unsqueeze(0)  # (1, C, T)
+                    ref_latents, _ = self.dcae_model.encode(reference_tensor)
                 conditions['reference_audio'] = ref_latents
             else:
                 conditions['reference_audio'] = None
@@ -321,8 +324,27 @@ class LyroPipeline:
     def _decode_to_audio(self, latents: torch.Tensor) -> torch.Tensor:
         """잠재 벡터를 오디오로 디코딩"""
         try:
+            # latents 차원 확인
+            if latents.dim() == 3 and latents.shape[0] == 1:
+                # (1, C, T) 형태는 그대로 유지
+                pass
+            elif latents.dim() == 2:
+                # (C, T) -> (1, C, T)
+                latents = latents.unsqueeze(0)
+            else:
+                logger.warning(f"Unexpected latents shape: {latents.shape}")
+            
             decoded_audio = self.dcae_model.decode(latents)
-            return decoded_audio.squeeze(0)  # 배치 차원 제거
+            
+            # 배치 차원 제거 및 shape 검증
+            if decoded_audio.dim() == 3 and decoded_audio.shape[0] == 1:
+                decoded_audio = decoded_audio.squeeze(0)  # (1, C, T) -> (C, T)
+            elif decoded_audio.dim() == 2:
+                pass  # 이미 (C, T) 형태
+            else:
+                logger.warning(f"Unexpected decoded audio shape: {decoded_audio.shape}")
+            
+            return decoded_audio
         except Exception as e:
             logger.error(f"Audio decoding failed: {e}")
             # 폴백: 노이즈 오디오
@@ -367,6 +389,11 @@ class LyroPipeline:
         try:
             if isinstance(reference, torch.Tensor):
                 audio = reference
+                # tensor인 경우 차원 정규화
+                if audio.dim() == 1:
+                    audio = audio.unsqueeze(0)  # (T,) -> (1, T)
+                elif audio.dim() == 3 and audio.shape[0] == 1:
+                    audio = audio.squeeze(0)  # (1, C, T) -> (C, T)
             else:
                 # 파일에서 로드
                 audio, sr = self.audio_processor.load_audio(

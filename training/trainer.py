@@ -1,4 +1,3 @@
-# lyro/training/trainer.py
 """
 LYRO Generator 트레이너 (프리트레인된 DCAE 사용)
 """
@@ -23,9 +22,9 @@ from .utils import (
     TrainingMetrics, MemoryManager, TensorValidator, 
     LearningRateScheduler, CheckpointManager, LoggingManager
 )
-from ..utils.metrics import MetricCalculator
-from ..utils.audio import AudioProcessor
-from ..models.losses import CombinedLoss
+from utils.metrics import MetricCalculator
+from utils.audio import AudioProcessor
+from models.losses import CombinedLoss
 
 warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
@@ -134,7 +133,7 @@ class GeneratorTrainer:
     
     def _setup_loss_function(self):
         """Generator 손실 함수 설정"""
-        from ..models.losses import CombinedLoss, FlowMatchingLoss, REPALoss, ReconstructionLoss, PerceptualLoss
+        from models.losses import CombinedLoss, FlowMatchingLoss, REPALoss, ReconstructionLoss, PerceptualLoss
         
         # 개별 손실 함수들
         flow_loss = FlowMatchingLoss()

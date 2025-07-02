@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# lyro/scripts/generate.py
 """
 LYRO 음악 생성 스크립트
 훈련된 DCAE + Generator 모델을 사용한 음악 생성
@@ -17,14 +16,14 @@ import logging
 # 프로젝트 루트 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lyro.inference import (
+from inference import (
     create_simple_pipeline, 
     LyroGenerator, 
     GenerationConfig, 
     GenerationInput
 )
-from lyro.training.config import LyroConfig
-from lyro.utils import safe_save_audio
+from training.config import LyroConfig
+from utils import safe_save_audio
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

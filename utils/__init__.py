@@ -31,6 +31,8 @@ __all__ = [
     'AudioConfig',
     'ensure_audio_format',
     'detect_audio_quality',
+    'get_audio_processor',
+    'safe_save_audio',
     
     # Metrics
     'MetricCalculator',

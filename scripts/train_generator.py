@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# lyro/scripts/train_generator.py
 """
 LYRO Generator 훈련 스크립트 (프리트레인된 DCAE 사용)
 1.5B 파라미터 SSM + Flow Matching + REPA Loss
@@ -19,15 +18,13 @@ import time
 # 프로젝트 루트 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lyro.models.ssm_flow import create_ssm_flow_generator
-from lyro.models.dcae import create_dcae_model
-from lyro.models.losses import CombinedLoss, FlowMatchingLoss, REPALoss, ReconstructionLoss, PerceptualLoss
-from lyro.data.dataset import create_lyro_datasets
-from lyro.data.collator import LyroCollator
-from lyro.data.tokenizer import LyroTokenizer
-from lyro.training.config import LyroConfig
-from lyro.training.trainer import create_trainer
-from lyro.utils import get_audio_processor
+# 수정된 imports
+from models import create_lyro_generator, create_dcae_model
+from models.losses import CombinedLoss, FlowMatchingLoss, REPALoss, ReconstructionLoss, PerceptualLoss
+from data import create_lyro_datasets, LyroCollator, LyroTokenizer
+from training.config import LyroConfig
+from training.trainer import create_trainer
+from utils import get_audio_processor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -94,7 +91,7 @@ class LyroGeneratorTrainer:
     
     def _create_generator(self):
         """1.5B 파라미터 Generator 생성"""
-        generator = create_ssm_flow_generator(
+        generator = create_lyro_generator(
             latent_channels=self.config.generator.latent_channels,
             latent_size=self.config.generator.latent_time_steps,
             d_model=self.config.generator.d_model,

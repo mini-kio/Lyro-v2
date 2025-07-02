@@ -1,9 +1,9 @@
-# lyro/models/__init__.py
 """
 LYRO Models Package (프리트레인된 DCAE + Generator 훈련)
 """
 
 from .dcae import PretrainedDCAE, create_dcae_model
+from .generator import LyroGenerator, GeneratorConfig, create_lyro_generator
 from .ssm_flow import SSMFlowGenerator, create_ssm_flow_generator
 from .encoders import CaptionEncoder, LyricsEncoder, ReferenceEncoder
 from .losses import (
@@ -20,6 +20,9 @@ __all__ = [
     'create_dcae_model',
     
     # Generator
+    'LyroGenerator',
+    'GeneratorConfig',
+    'create_lyro_generator',
     'SSMFlowGenerator',
     'create_ssm_flow_generator',
     

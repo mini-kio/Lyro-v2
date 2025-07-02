@@ -318,13 +318,27 @@ class LyroCollator:
     
     def _ensure_stereo(self, audio: torch.Tensor) -> torch.Tensor:
         """스테레오 포맷 보장"""
+        # 차원 정리
         if audio.dim() == 1:
+            # (T,) -> (2, T)
             audio = audio.unsqueeze(0).repeat(2, 1)
         elif audio.dim() == 2:
             if audio.shape[0] == 1:
+                # (1, T) -> (2, T)
                 audio = audio.repeat(2, 1)
             elif audio.shape[0] > 2:
+                # (C, T) where C > 2 -> (2, T)
                 audio = audio[:2, :]
+            # audio.shape[0] == 2인 경우는 그대로 유지
+        elif audio.dim() == 3:
+            # (B, C, T) 형태인 경우 batch dimension 제거
+            if audio.shape[0] == 1:
+                audio = audio.squeeze(0)
+                return self._ensure_stereo(audio)  # 재귀 호출
+            else:
+                raise ValueError(f"Unexpected batch size in audio tensor: {audio.shape}")
+        else:
+            raise ValueError(f"Unexpected audio tensor dimensions: {audio.shape}")
         
         return audio
     

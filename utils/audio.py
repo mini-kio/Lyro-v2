@@ -104,11 +104,18 @@ class AudioProcessor:
                 audio = resampler(audio)
                 sr = target_sr
             
-            # 채널 처리
-            if mono and audio.shape[0] > 1:
-                audio = audio.mean(dim=0, keepdim=True)
-            elif not mono and audio.shape[0] == 1 and self.config.channels == 2:
-                audio = audio.repeat(2, 1)
+            # 채널 처리 - 차원 안전성 확보
+            if audio.dim() == 1:
+                # (T,) -> (1, T) 단일 채널
+                audio = audio.unsqueeze(0)
+            elif audio.dim() == 2:
+                # (C, T) 형태 확인
+                if mono and audio.shape[0] > 1:
+                    audio = audio.mean(dim=0, keepdim=True)
+                elif not mono and audio.shape[0] == 1 and self.config.channels == 2:
+                    audio = audio.repeat(2, 1)
+            else:
+                raise ValueError(f"Unexpected audio tensor dimensions: {audio.shape}")
             
             # 정규화
             if normalize:

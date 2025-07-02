@@ -283,6 +283,12 @@ class LyroDataset(Dataset):
     
     def _process_audio(self, audio: torch.Tensor, sr: int) -> torch.Tensor:
         """Process audio to standard format"""
+        # 차원 정규화
+        if audio.dim() == 1:
+            audio = audio.unsqueeze(0)  # (T,) -> (1, T)
+        elif audio.dim() != 2:
+            raise ValueError(f"Expected 1D or 2D audio tensor, got {audio.shape}")
+        
         # Resample if needed
         if sr != 44100:
             resampler = torchaudio.transforms.Resample(sr, 44100)

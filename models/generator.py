@@ -51,6 +51,18 @@ class GeneratorConfig:
     layer_norm_eps: float = 1e-5
 
 
+def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Rotary Position Embedding 적용"""
+    def rotate_half(x):
+        """벡터의 절반을 회전"""
+        x1, x2 = x[..., :x.shape[-1]//2], x[..., x.shape[-1]//2:]
+        return torch.cat((-x2, x1), dim=-1)
+    
+    q_embed = q * cos + rotate_half(q) * sin
+    k_embed = k * cos + rotate_half(k) * sin
+    return q_embed, k_embed
+
+
 class RotaryPositionalEmbedding(nn.Module):
     """Rotary Positional Embedding"""
     
@@ -199,6 +211,17 @@ class MultiHeadAttention(nn.Module):
         
         # RoPE 적용
         cos, sin = self.rope(x)
+        
+        # cos, sin을 q, k의 shape에 맞게 확장
+        # cos, sin: (seq_len, d_head//2) -> (1, 1, seq_len, d_head//2)
+        cos = cos.unsqueeze(0).unsqueeze(0)
+        sin = sin.unsqueeze(0).unsqueeze(0)
+        
+        # d_head가 홀수인 경우를 대비해 repeat으로 확장
+        if cos.shape[-1] != q.shape[-1]:
+            cos = cos.repeat(1, 1, 1, 2)[:, :, :, :q.shape[-1]]
+            sin = sin.repeat(1, 1, 1, 2)[:, :, :, :q.shape[-1]]
+        
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
         
         # Attention
@@ -398,13 +421,22 @@ class LyroGenerator(nn.Module):
         """
         batch_size = latents.shape[0]
         
-        # 잠재 벡터를 시퀀스 형태로 변환
+        # 잠재 벡터를 시퀀스 형태로 변환 - 차원 확인
+        if latents.dim() != 3:
+            raise ValueError(f"Expected latents to have 3 dimensions (B, C, T), got {latents.shape}")
+        
+        # (B, C, T) -> (B, T, C)
         latents = rearrange(latents, 'b c t -> b t c')
         
         # 잠재 임베딩
         x = self.latent_embed(latents)
         
-        # 시간 임베딩
+        # 시간 임베딩 - timesteps 차원 확인
+        if timesteps.dim() == 0:
+            timesteps = timesteps.unsqueeze(0)
+        if timesteps.dim() == 1 and timesteps.shape[0] != batch_size:
+            timesteps = timesteps.expand(batch_size)
+        
         time_embed = self.time_embed(timesteps.unsqueeze(-1))
         time_embed = time_embed.unsqueeze(1)
         x = x + time_embed
@@ -419,6 +451,10 @@ class LyroGenerator(nn.Module):
             batch_size=batch_size
         )
         
+        # condition_embed shape: (B, 1, d_model) -> (B, T, d_model)로 브로드캐스트
+        seq_len = x.shape[1]
+        condition_embed = condition_embed.expand(-1, seq_len, -1)
+        
         x = x + condition_embed
         
         # Transformer 레이어들
@@ -429,7 +465,11 @@ class LyroGenerator(nn.Module):
         x = self.final_norm(x)
         x = self.output_proj(x)
         
-        # 원래 형태로 복원
+        # 원래 형태로 복원 - 차원 검증
+        if x.dim() != 3:
+            raise ValueError(f"Expected output to have 3 dimensions, got {x.shape}")
+        
+        # (B, T, C) -> (B, C, T)
         x = rearrange(x, 'b t c -> b c t')
         
         return x
@@ -446,6 +486,10 @@ class LyroGenerator(nn.Module):
         """Training loss calculation"""
         batch_size = latents.shape[0]
         device = latents.device
+        
+        # latents 차원 검증
+        if latents.dim() != 3:
+            raise ValueError(f"Expected latents to have 3 dimensions (B, C, T), got {latents.shape}")
         
         # 시간 샘플링
         t = torch.rand(batch_size, device=device)
