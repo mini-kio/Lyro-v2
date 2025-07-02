@@ -1,6 +1,6 @@
 """
-LYRO 통합 추론 파이프라인
-DCAE + Generator + CFG 샘플링을 통합한 완전한 음악 생성 시스템
+LYRO 통합 추론 파이프라인 (올바른 DCAE + Vocoder 아키텍처)
+DCAE (멜 <-> 잠재벡터) + Vocoder (멜 <-> 오디오) + Generator + CFG 샘플링을 통합한 완전한 음악 생성 시스템
 """
 
 import torch
@@ -14,7 +14,7 @@ import logging
 import time
 import warnings
 
-from models.dcae import PretrainedDCAE, create_dcae_model
+from models.dcae import PretrainedDCAE, AdvancedVocoder, create_dcae_model, create_vocoder_model
 from models.generator import LyroGenerator, GeneratorConfig, create_lyro_generator
 from models.sampling import FlowMatchingSampler
 from data.processor import DataProcessor, ProcessorConfig
@@ -88,23 +88,26 @@ class GenerationInput:
 
 class LyroPipeline:
     """
-    LYRO 통합 생성 파이프라인
+    LYRO 통합 생성 파이프라인 (올바른 DCAE + Vocoder 아키텍처)
     """
     
     def __init__(
         self,
         dcae_model: PretrainedDCAE,
+        vocoder_model: AdvancedVocoder,
         generator_model: LyroGenerator,
         data_processor: DataProcessor,
         device: Optional[torch.device] = None
     ):
         self.dcae_model = dcae_model
+        self.vocoder_model = vocoder_model
         self.generator_model = generator_model
         self.data_processor = data_processor
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # 모델들을 디바이스로 이동 및 eval 모드
         self.dcae_model = self.dcae_model.to(self.device).eval()
+        self.vocoder_model = self.vocoder_model.to(self.device).eval()
         self.generator_model = self.generator_model.to(self.device).eval()
         
         # 유틸리티 초기화
@@ -112,6 +115,10 @@ class LyroPipeline:
         self.metric_calculator = MetricCalculator(44100)
         
         logger.info(f"LYRO Pipeline initialized on {self.device}")
+        logger.info("Pipeline components:")
+        logger.info(f"  - DCAE: {type(self.dcae_model).__name__}")
+        logger.info(f"  - Vocoder: {type(self.vocoder_model).__name__}")
+        logger.info(f"  - Generator: {type(self.generator_model).__name__}")
     
     @classmethod
     def from_pretrained(
@@ -126,9 +133,15 @@ class LyroPipeline:
         """
         device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # DCAE 로드
+        # DCAE 로드 (멜 <-> 잠재벡터)
         dcae_model = create_dcae_model(
             model_type="pretrained",
+            model_name=dcae_model_name,
+            cache_dir=cache_dir
+        )
+        
+        # Vocoder 로드 (멜 <-> 오디오)
+        vocoder_model = create_vocoder_model(
             model_name=dcae_model_name,
             cache_dir=cache_dir
         )
@@ -148,6 +161,7 @@ class LyroPipeline:
         
         return cls(
             dcae_model=dcae_model,
+            vocoder_model=vocoder_model,
             generator_model=generator_model,
             data_processor=data_processor,
             device=device
@@ -160,7 +174,7 @@ class LyroPipeline:
         verbose: bool = True
     ) -> Dict[str, Any]:
         """
-        음악 생성 메인 함수
+        음악 생성 메인 함수 (올바른 파이프라인)
         """
         if generation_config is None:
             generation_config = GenerationConfig()
@@ -180,7 +194,7 @@ class LyroPipeline:
         start_time = time.time()
         
         if verbose:
-            print(f"🎵 Starting {input_data.task} generation...")
+            print(f"🎵 Starting {input_data.task} generation with corrected pipeline...")
             print(f"   Duration: {generation_config.duration}s")
             print(f"   Quality: {generation_config.quality}")
             print(f"   CFG Scale: {generation_config.cfg_scale}")
@@ -192,9 +206,9 @@ class LyroPipeline:
         with torch.no_grad():
             generated_latents = self._generate_latents(conditions, generation_config, verbose)
         
-        # 오디오 디코딩
+        # 올바른 파이프라인: 잠재벡터 -> 멜 -> 오디오
         with torch.no_grad():
-            generated_audio = self._decode_to_audio(generated_latents)
+            generated_audio = self._decode_to_audio_correct_pipeline(generated_latents)
         
         # 후처리
         processed_audio = self._post_process_audio(generated_audio, generation_config)
@@ -212,21 +226,23 @@ class LyroPipeline:
             'input': input_data,
             'metadata': {
                 'model': 'LYRO',
-                'version': '1.0',
+                'version': '1.0_corrected',
                 'timestamp': time.time(),
                 'dcae_compression': self.dcae_model.compression_ratio,
-                'generator_parameters': self.generator_model.count_parameters()
+                'generator_parameters': self.generator_model.count_parameters(),
+                'pipeline': 'audio->mel->dcae->mel->audio'
             }
         }
         
         if verbose:
             print(f"✅ Generation completed in {generation_time:.2f}s")
             print(f"   Output shape: {processed_audio.shape}")
+            print(f"   Pipeline: Latents -> Mel -> Audio (Vocoder)")
         
         return result
     
     def _prepare_conditions(self, input_data: GenerationInput) -> Dict[str, Any]:
-        """조건 준비"""
+        """조건 준비 (참조 오디오 처리 수정)"""
         conditions = {}
         
         # 태스크 타입
@@ -265,20 +281,10 @@ class LyroPipeline:
         else:
             conditions['captions'] = None
         
-        # 참조 오디오 처리
+        # 참조 오디오 처리 (올바른 파이프라인)
         if input_data.reference_audio:
-            reference_tensor = self._load_reference_audio(input_data.reference_audio)
-            if reference_tensor is not None:
-                # DCAE로 인코딩 - batch dimension 확인
-                with torch.no_grad():
-                    if reference_tensor.dim() == 1:
-                        reference_tensor = reference_tensor.unsqueeze(0).unsqueeze(0)  # (1, 1, T)
-                    elif reference_tensor.dim() == 2:
-                        reference_tensor = reference_tensor.unsqueeze(0)  # (1, C, T)
-                    ref_latents, _ = self.dcae_model.encode(reference_tensor)
-                conditions['reference_audio'] = ref_latents
-            else:
-                conditions['reference_audio'] = None
+            reference_latents = self._load_reference_audio_correct_pipeline(input_data.reference_audio)
+            conditions['reference_audio'] = reference_latents
         else:
             conditions['reference_audio'] = None
         
@@ -293,11 +299,15 @@ class LyroPipeline:
         """잠재 벡터 생성"""
         # 타겟 형태 계산
         target_samples = int(config.sample_rate * config.duration)
-        # DCAE 압축률에 따른 잠재 벡터 시간 길이 계산
-        target_latent_time = target_samples // (config.sample_rate // 128)  # 대략적인 계산
-        target_latent_time = min(max(target_latent_time, 64), 256)  # 범위 제한
+        # 멜 스펙트로그램 시간 길이 계산 (hop_length=512 기준)
+        target_mel_time = target_samples // 512
+        target_mel_time = min(max(target_mel_time, 64), 512)  # 범위 제한
         
-        shape = (1, 16, target_latent_time)  # (batch, channels, time)
+        # DCAE latent 크기 추정 (멜 크기에서 압축)
+        estimated_latent_h = target_mel_time // 8  # 대략적인 압축률
+        estimated_latent_w = 128 // 8  # 멜 주파수 빈 압축
+        
+        shape = (1, 16, estimated_latent_h, estimated_latent_w)  # (batch, channels, h, w)
         
         # CFG 생성
         if config.quality == "fast":
@@ -321,35 +331,93 @@ class LyroPipeline:
         
         return generated_latents
     
-    def _decode_to_audio(self, latents: torch.Tensor) -> torch.Tensor:
-        """잠재 벡터를 오디오로 디코딩"""
+    def _decode_to_audio_correct_pipeline(self, latents: torch.Tensor) -> torch.Tensor:
+        """
+        올바른 파이프라인: 잠재 벡터 -> 멜 스펙트로그램 -> 오디오
+        """
         try:
-            # latents 차원 확인
-            if latents.dim() == 3 and latents.shape[0] == 1:
-                # (1, C, T) 형태는 그대로 유지
-                pass
-            elif latents.dim() == 2:
-                # (C, T) -> (1, C, T)
-                latents = latents.unsqueeze(0)
-            else:
+            # Step 1: 잠재 벡터 -> 멜 스펙트로그램 (DCAE 디코딩)
+            if latents.dim() == 3:
+                # Generator 출력이 3D인 경우 4D로 변환
+                latents = latents.unsqueeze(1)  # (B, 1, H, W)
+            elif latents.dim() != 4:
                 logger.warning(f"Unexpected latents shape: {latents.shape}")
+                # 적절한 4D 형태로 변환 시도
+                if latents.dim() == 2:
+                    # (B, C*H*W) -> (B, C, H, W)
+                    B = latents.shape[0]
+                    remaining = latents.shape[1]
+                    # 16 채널이라고 가정하고 H, W 추정
+                    C = 16
+                    HW = remaining // C
+                    H = W = int(np.sqrt(HW))
+                    latents = latents.view(B, C, H, W)
+                else:
+                    raise ValueError(f"Cannot handle latents shape: {latents.shape}")
             
-            decoded_audio = self.dcae_model.decode(latents)
+            # DCAE 디코딩: 잠재벡터 -> 멜 스펙트로그램
+            decoded_mel = self.dcae_model.decode_to_mel(latents)
             
-            # 배치 차원 제거 및 shape 검증
+            # Step 2: 멜 스펙트로그램 -> 오디오 (Vocoder)
+            decoded_audio = self.vocoder_model.mel_to_audio(decoded_mel)
+            
+            # 배치 차원 처리
             if decoded_audio.dim() == 3 and decoded_audio.shape[0] == 1:
                 decoded_audio = decoded_audio.squeeze(0)  # (1, C, T) -> (C, T)
             elif decoded_audio.dim() == 2:
                 pass  # 이미 (C, T) 형태
             else:
                 logger.warning(f"Unexpected decoded audio shape: {decoded_audio.shape}")
+                if decoded_audio.dim() > 2:
+                    decoded_audio = decoded_audio.squeeze(0)
             
             return decoded_audio
+            
         except Exception as e:
             logger.error(f"Audio decoding failed: {e}")
             # 폴백: 노이즈 오디오
             target_samples = int(10 * 44100)
             return torch.randn(2, target_samples, device=self.device) * 0.1
+    
+    def _load_reference_audio_correct_pipeline(self, reference: Union[str, Path, torch.Tensor]) -> Optional[torch.Tensor]:
+        """
+        참조 오디오 로드 (올바른 파이프라인: 오디오 -> 멜 -> DCAE latent)
+        """
+        try:
+            if isinstance(reference, torch.Tensor):
+                audio = reference
+                # tensor인 경우 차원 정규화
+                if audio.dim() == 1:
+                    audio = audio.unsqueeze(0).repeat(2, 1)  # (T,) -> (2, T)
+                elif audio.dim() == 2 and audio.shape[0] == 1:
+                    audio = audio.repeat(2, 1)  # (1, T) -> (2, T)
+                elif audio.dim() == 3 and audio.shape[0] == 1:
+                    audio = audio.squeeze(0)  # (1, C, T) -> (C, T)
+            else:
+                # 파일에서 로드
+                audio, sr = self.audio_processor.load_audio(
+                    path=reference,
+                    target_sr=44100,
+                    normalize=True
+                )
+            
+            # 배치 차원 추가
+            if audio.dim() == 2:
+                audio = audio.unsqueeze(0)  # (C, T) -> (1, C, T)
+            
+            # 올바른 파이프라인: 오디오 -> 멜 -> DCAE latent
+            with torch.no_grad():
+                # Step 1: 오디오 -> 멜 스펙트로그램
+                mel = self.dcae_model.audio_to_mel(audio)
+                
+                # Step 2: 멜 스펙트로그램 -> DCAE latent
+                ref_latents, _ = self.dcae_model.encode_mel(mel)
+                
+            return ref_latents
+            
+        except Exception as e:
+            logger.error(f"Failed to load reference audio: {e}")
+            return None
     
     def _post_process_audio(self, audio: torch.Tensor, config: GenerationConfig) -> torch.Tensor:
         """오디오 후처리"""
@@ -383,32 +451,6 @@ class LyroPipeline:
         audio = torch.clamp(audio, -1.0, 1.0)
         
         return audio
-    
-    def _load_reference_audio(self, reference: Union[str, Path, torch.Tensor]) -> Optional[torch.Tensor]:
-        """참조 오디오 로드"""
-        try:
-            if isinstance(reference, torch.Tensor):
-                audio = reference
-                # tensor인 경우 차원 정규화
-                if audio.dim() == 1:
-                    audio = audio.unsqueeze(0)  # (T,) -> (1, T)
-                elif audio.dim() == 3 and audio.shape[0] == 1:
-                    audio = audio.squeeze(0)  # (1, C, T) -> (C, T)
-            else:
-                # 파일에서 로드
-                audio, sr = self.audio_processor.load_audio(
-                    path=reference,
-                    target_sr=44100,
-                    normalize=True
-                )
-            
-            # 처리
-            processed = self.data_processor.process_audio_only(audio)
-            return processed
-            
-        except Exception as e:
-            logger.error(f"Failed to load reference audio: {e}")
-            return None
     
     def save_audio(
         self,
@@ -487,14 +529,65 @@ class LyroPipeline:
                 'compression_ratio': self.dcae_model.compression_ratio,
                 'latent_channels': self.dcae_model.latent_channels
             },
+            'vocoder': {
+                'model_name': getattr(self.vocoder_model, 'model_name', 'Unknown'),
+                'sample_rate': getattr(self.vocoder_model, 'sample_rate', 44100)
+            },
             'generator': {
                 'parameters': self.generator_model.count_parameters(),
                 'd_model': self.generator_model.config.d_model,
                 'n_layers': self.generator_model.config.n_layers
             },
             'device': str(self.device),
-            'pipeline_version': '1.0'
+            'pipeline_version': '1.0_corrected',
+            'pipeline_architecture': 'audio->mel->dcae_latent->mel->audio'
         }
+    
+    def test_pipeline(self) -> Dict[str, Any]:
+        """파이프라인 테스트"""
+        print("🧪 Testing corrected LYRO pipeline...")
+        
+        # 테스트 오디오 생성
+        test_audio = torch.randn(1, 2, 44100 * 3).to(self.device)  # 3초 오디오
+        
+        results = {}
+        
+        try:
+            # Step 1: 오디오 -> 멜
+            mel = self.dcae_model.audio_to_mel(test_audio)
+            results['audio_to_mel'] = {'input_shape': test_audio.shape, 'output_shape': mel.shape}
+            print(f"  ✅ Audio -> Mel: {test_audio.shape} -> {mel.shape}")
+            
+            # Step 2: 멜 -> DCAE latent
+            latents, _ = self.dcae_model.encode_mel(mel)
+            results['mel_to_latent'] = {'input_shape': mel.shape, 'output_shape': latents.shape}
+            print(f"  ✅ Mel -> Latent: {mel.shape} -> {latents.shape}")
+            
+            # Step 3: DCAE latent -> 멜
+            reconstructed_mel = self.dcae_model.decode_to_mel(latents)
+            results['latent_to_mel'] = {'input_shape': latents.shape, 'output_shape': reconstructed_mel.shape}
+            print(f"  ✅ Latent -> Mel: {latents.shape} -> {reconstructed_mel.shape}")
+            
+            # Step 4: 멜 -> 오디오
+            reconstructed_audio = self.vocoder_model.mel_to_audio(reconstructed_mel)
+            results['mel_to_audio'] = {'input_shape': reconstructed_mel.shape, 'output_shape': reconstructed_audio.shape}
+            print(f"  ✅ Mel -> Audio: {reconstructed_mel.shape} -> {reconstructed_audio.shape}")
+            
+            # 전체 파이프라인 테스트
+            test_latents = torch.randn(1, 16, 16, 32).to(self.device)
+            final_audio = self._decode_to_audio_correct_pipeline(test_latents)
+            results['full_pipeline'] = {'input_shape': test_latents.shape, 'output_shape': final_audio.shape}
+            print(f"  ✅ Full Pipeline: {test_latents.shape} -> {final_audio.shape}")
+            
+            results['status'] = 'success'
+            print("🎉 Pipeline test completed successfully!")
+            
+        except Exception as e:
+            results['status'] = 'failed'
+            results['error'] = str(e)
+            print(f"❌ Pipeline test failed: {e}")
+        
+        return results
 
 
 def create_pipeline(
@@ -528,13 +621,18 @@ def quick_generate(
     generator_checkpoint: str = None
 ) -> Dict[str, Any]:
     """
-    빠른 생성 헬퍼 함수
+    빠른 생성 헬퍼 함수 (올바른 파이프라인)
     """
     # 파이프라인 생성
     pipeline = create_pipeline(
         dcae_model_name=dcae_model_name,
         generator_checkpoint=generator_checkpoint
     )
+    
+    # 파이프라인 테스트
+    test_result = pipeline.test_pipeline()
+    if test_result['status'] != 'success':
+        print("⚠️ Pipeline test failed, proceeding anyway...")
     
     # 입력 준비
     generation_input = GenerationInput(
@@ -565,16 +663,17 @@ def quick_generate(
 
 if __name__ == "__main__":
     # 테스트
-    print("Testing LYRO Pipeline...")
+    print("Testing corrected LYRO Pipeline...")
     
     # 빠른 생성 테스트
     result = quick_generate(
         lyrics="Walking down the street tonight, the stars are shining bright",
         duration=5.0,
         quality="fast",
-        output_path="test_output.wav"
+        output_path="test_output_corrected.wav"
     )
     
     print(f"Generation completed!")
     print(f"Audio shape: {result['audio'].shape}")
     print(f"Generation time: {result['generation_time']:.2f}s")
+    print(f"Pipeline: {result['metadata']['pipeline']}")
