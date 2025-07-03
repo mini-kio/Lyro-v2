@@ -47,10 +47,10 @@ def create_simple_pipeline(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # 파이프라인 생성
-    pipeline = LyroPipeline.from_checkpoints(
-        dcae_checkpoint=dcae_checkpoint,
+    pipeline = LyroPipeline.from_pretrained(
+        dcae_model_name=dcae_checkpoint,
         generator_checkpoint=generator_checkpoint,
-        config=config,
+        cache_dir="checkpoints",
         device=device
     )
     
