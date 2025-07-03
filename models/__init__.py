@@ -2,7 +2,7 @@
 LYRO Models Package (프리트레인된 DCAE + Vocoder + Generator 훈련)
 """
 
-from .dcae import PretrainedDCAE, AdvancedVocoder, create_dcae_model, create_vocoder_model
+from .dcae import PretrainedDCAE, AdvancedVocoder, create_dcae_model
 from .generator import LyroGenerator, GeneratorConfig, create_lyro_generator
 from .ssm_flow import SSMFlowGenerator, create_ssm_flow_generator
 from .encoders import CaptionEncoder, LyricsEncoder, ReferenceEncoder
@@ -19,7 +19,6 @@ __all__ = [
     'PretrainedDCAE',
     'AdvancedVocoder',
     'create_dcae_model',
-    'create_vocoder_model',
     
     # Generator
     'LyroGenerator',
@@ -57,19 +56,13 @@ def create_lyro_models(config):
     """
     models = {}
     
-    # 프리트레인된 DCAE (훈련하지 않음)
+    # 프리트레인된 DCAE + Vocoder (훈련하지 않음)
     models['dcae'] = create_dcae_model(
         model_name=config.dcae.model_name,
         subfolder=config.dcae.subfolder,
         cache_dir=config.dcae.cache_dir,
-        sample_rate=config.dcae.sample_rate
-    )
-    
-    # 프리트레인된 Vocoder (훈련하지 않음)
-    models['vocoder'] = create_vocoder_model(
-        model_name=config.dcae.model_name,
-        cache_dir=config.dcae.cache_dir,
-        sample_rate=config.dcae.sample_rate
+        sample_rate=config.dcae.sample_rate,
+        use_vocoder=getattr(config.dcae, 'use_vocoder', True)  # 기본값 True
     )
     
     # Generator (SSM + Flow Matching, 훈련 대상)
@@ -160,9 +153,9 @@ def get_model_info():
             'trainable': False
         },
         'vocoder': {
-            'type': 'Pretrained ACE-Step Vocoder',
-            'model_name': 'ACE-Step/ACE-Step-v1-3.5B',
-            'sample_rate': 44100,
+            'type': 'HiFi-GAN Style Advanced Vocoder',
+            'purpose': 'Latent-to-Audio high-quality synthesis',
+            'architecture': 'ConvTranspose + Residual Blocks',
             'trainable': False
         },
         'ssm_generator': {
@@ -176,6 +169,27 @@ def get_model_info():
             'lyrics': 'Custom Tokenizer + Embedding',
             'reference': 'DCAE-based'
         },
-        'pipeline': 'audio->mel->dcae_latent->generator->dcae_mel->vocoder->audio',
-        'total_trainable_parameters': '~1.5B'
+        'total_trainable_parameters': '~1.5B',
+        'pipeline': 'Text → Generator → Latents → DCAE Encoder + Vocoder → Audio'
+    }
+
+
+def estimate_model_memory(config):
+    """모델 메모리 사용량 추정"""
+    memory_estimate = {
+        'dcae_encoder': 2.0,  # GB (frozen)
+        'vocoder': 0.5,       # GB (frozen)
+        'generator': 3.0,     # GB (1.5B params in fp16)
+        'encoders': 0.3,      # GB
+        'training_overhead': 2.0,  # GB (gradients, optimizer states)
+        'batch_data': config.generator.batch_size * 0.5,  # GB per batch
+    }
+    
+    total_memory = sum(memory_estimate.values())
+    
+    return {
+        'breakdown': memory_estimate,
+        'total_estimated': f"{total_memory:.1f} GB",
+        'recommended_gpu': "RTX 4090 (24GB)" if total_memory <= 24 else "H100 (80GB)",
+        'note': 'Estimates include DCAE + Vocoder + Generator in mixed precision'
     }

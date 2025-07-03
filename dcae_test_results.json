@@ -2,26 +2,18 @@
   "test_info": {
     "dcae_model": "ACE-Step/ACE-Step-v1-3.5B",
     "device": "cpu",
-    "timestamp": 1751523048.408765
+    "timestamp": 1751524921.0904145
   },
   "basic_pipeline": {
-    "audio_to_mel": {
+    "audio_to_latent": {
       "success": true,
-      "time": 0.0037369728088378906,
+      "time": 0.3078436851501465,
       "shapes": [
         "torch.Size([1, 2, 132300])",
-        "torch.Size([1, 2, 128, 260])"
-      ]
-    },
-    "mel_to_latent": {
-      "success": true,
-      "time": 0.3144519329071045,
-      "shapes": [
-        "torch.Size([1, 2, 128, 260])",
         "torch.Size([1, 16, 16, 16])"
       ]
     },
-    "latent_to_mel": {
+    "latent_to_audio": {
       "success": true,
       "time": 0.0,
       "shapes": [
@@ -29,16 +21,12 @@
         "torch.Size([1, 2, 128, 256])"
       ]
     },
-    "mel_to_audio": {
-      "success": true,
-      "time": 0.3431246280670166,
-      "shapes": [
-        "torch.Size([1, 2, 128, 256])",
-        "torch.Size([1, 4, 65536])"
-      ]
-    },
-    "total_time": 0.661313533782959,
+    "total_time": 0.3078436851501465,
     "pipeline_success": true
+  },
+  "real_audio": {
+    "success": false,
+    "error": "The size of tensor a (44100) must match the size of tensor b (441000) at non-singleton dimension 3"
   },
   "compression": {
     "1.0s": {
@@ -110,9 +98,9 @@
     "generator_params": 45699600,
     "training_success": true,
     "generation_success": true,
-    "latent_shape_4d": "torch.Size([1, 16, 16, 16])",
+    "latent_shape_original": "torch.Size([1, 16, 16, 16])",
     "latent_shape_3d": "torch.Size([1, 16, 256])",
-    "generated_shape": "torch.Size([1, 4, 65536])",
-    "flow_loss": 2.0460944175720215
+    "generated_shape": "torch.Size([1, 2, 128, 256])",
+    "flow_loss": 2.271231174468994
   }
 }

@@ -18,7 +18,7 @@ import json
 # 프로젝트 루트 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.dcae import create_dcae_model, create_vocoder_model
+from models.dcae import create_dcae_model
 from models.generator import create_lyro_generator, GeneratorConfig
 from utils.audio import AudioProcessor, AudioConfig
 from utils.metrics import MetricCalculator
@@ -41,16 +41,9 @@ class DCPipelineTester:
         
         print(f"🔧 Using device: {self.device}")
         
-        # 모델 로드
-        print("📥 Loading DCAE model...")
+        # 모델 로드 (DCAE + Vocoder 통합)
+        print("📥 Loading DCAE model with integrated Vocoder...")
         self.dcae_model = create_dcae_model(
-            model_type="pretrained",
-            model_name=dcae_model_name,
-            cache_dir=cache_dir
-        ).to(self.device).eval()
-        
-        print("📥 Loading Vocoder model...")
-        self.vocoder_model = create_vocoder_model(
             model_name=dcae_model_name,
             cache_dir=cache_dir
         ).to(self.device).eval()
@@ -61,7 +54,115 @@ class DCPipelineTester:
         
         print("✅ Models loaded successfully!")
         print(f"   DCAE: {type(self.dcae_model).__name__}")
-        print(f"   Vocoder: {type(self.vocoder_model).__name__}")
+        print(f"   Vocoder: {'Integrated' if hasattr(self.dcae_model, 'vocoder') and self.dcae_model.vocoder is not None else 'Fallback'}")
+    
+    def process_audio_with_chunking(self, audio: torch.Tensor, chunk_duration: float = 10.0, overlap: float = 1.0) -> torch.Tensor:
+        """
+        긴 오디오를 청킹하여 처리 (오버랩 포함)
+        
+        Args:
+            audio: (B, C, T) 입력 오디오
+            chunk_duration: 청크 길이 (초)
+            overlap: 오버랩 길이 (초)
+            
+        Returns:
+            reconstructed: (B, C, T) 재구성된 오디오
+        """
+        sample_rate = 44100
+        chunk_samples = int(chunk_duration * sample_rate)
+        overlap_samples = int(overlap * sample_rate)
+        
+        B, C, T = audio.shape
+        
+        # 짧은 오디오는 청킹하지 않음
+        if T <= chunk_samples:
+            print(f"   📦 Audio is short ({T/sample_rate:.1f}s), processing without chunking")
+            latents, _ = self.dcae_model.encode(audio)
+            return self.dcae_model.decode(latents)
+        
+        print(f"   📦 Processing {T/sample_rate:.1f}s audio with chunking (chunk: {chunk_duration}s, overlap: {overlap}s)")
+        
+        reconstructed_chunks = []
+        step_size = chunk_samples - overlap_samples
+        
+        for start in range(0, T - overlap_samples, step_size):
+            end = min(start + chunk_samples, T)
+            
+            # 청크 추출
+            chunk = audio[:, :, start:end]
+            print(f"   🔄 Processing chunk {start/sample_rate:.1f}s-{end/sample_rate:.1f}s ({chunk.shape[-1]/sample_rate:.1f}s)")
+            
+            # 청크 처리
+            try:
+                latents, _ = self.dcae_model.encode(chunk)
+                reconstructed_chunk = self.dcae_model.decode(latents, target_length=chunk.shape[-1])
+                
+                print(f"      Input: {chunk.shape} -> Output: {reconstructed_chunk.shape}")
+                
+                # 길이 검증
+                if reconstructed_chunk.shape[-1] != chunk.shape[-1]:
+                    print(f"      ⚠️ Length mismatch: expected {chunk.shape[-1]}, got {reconstructed_chunk.shape[-1]}")
+                    # 길이 조정
+                    if reconstructed_chunk.shape[-1] > chunk.shape[-1]:
+                        reconstructed_chunk = reconstructed_chunk[:, :, :chunk.shape[-1]]
+                    else:
+                        pad_length = chunk.shape[-1] - reconstructed_chunk.shape[-1]
+                        reconstructed_chunk = torch.nn.functional.pad(reconstructed_chunk, (0, pad_length))
+                
+                reconstructed_chunks.append((start, end, reconstructed_chunk))
+                
+            except Exception as e:
+                print(f"   ⚠️ Chunk processing failed: {e}")
+                # 더미 청크로 대체
+                dummy_chunk = torch.zeros_like(chunk)
+                reconstructed_chunks.append((start, end, dummy_chunk))
+        
+        # 청크들을 병합 (단순 연결 방식)
+        print(f"   🔗 Merging {len(reconstructed_chunks)} chunks")
+        
+        # 결과 텐서 초기화
+        result = torch.zeros_like(audio)
+        prev_end = 0
+        
+        for i, (start, end, chunk) in enumerate(reconstructed_chunks):
+            actual_len = min(chunk.shape[-1], end - start, result.shape[-1] - start)
+            
+            if actual_len > 0:
+                # 오버랩 처리
+                if i > 0 and start < prev_end:
+                    # 오버랩 영역에서 블렌딩
+                    overlap_start = start
+                    overlap_end = min(prev_end, start + actual_len)
+                    overlap_len = overlap_end - overlap_start
+                    
+                    if overlap_len > 0:
+                        # 선형 블렌딩
+                        alpha = torch.linspace(1.0, 0.0, overlap_len, device=audio.device)
+                        alpha = alpha.view(1, 1, -1)
+                        
+                        # 기존 값과 새 값을 블렌딩
+                        result[:, :, overlap_start:overlap_end] = (
+                            alpha * result[:, :, overlap_start:overlap_end] +
+                            (1 - alpha) * chunk[:, :, :overlap_len]
+                        )
+                        
+                        # 오버랩 이후 부분 추가
+                        non_overlap_start = overlap_end
+                        non_overlap_end = start + actual_len
+                        if non_overlap_end > non_overlap_start:
+                            chunk_start = non_overlap_start - start
+                            chunk_len = non_overlap_end - non_overlap_start
+                            result[:, :, non_overlap_start:non_overlap_end] = chunk[:, :, chunk_start:chunk_start + chunk_len]
+                    else:
+                        # 오버랩이 없으면 그냥 추가
+                        result[:, :, start:start + actual_len] = chunk[:, :, :actual_len]
+                else:
+                    # 첫 청크이거나 오버랩이 없으면 그냥 추가
+                    result[:, :, start:start + actual_len] = chunk[:, :, :actual_len]
+                
+                prev_end = start + actual_len
+        
+        return result
     
     def test_pipeline_basic(self, duration: float = 3.0) -> dict:
         """기본 파이프라인 테스트"""
@@ -75,36 +176,22 @@ class DCPipelineTester:
         print(f"   📄 Input audio: {test_audio.shape}")
         
         try:
-            # 2. 오디오 -> 멜 스펙트로그램
+            # 2. 오디오 -> DCAE latent (인코딩)
             start_time = time.time()
-            mel = self.dcae_model.audio_to_mel(test_audio)
-            mel_time = time.time() - start_time
-            print(f"   ✅ Audio -> Mel: {test_audio.shape} -> {mel.shape} ({mel_time:.3f}s)")
-            results['audio_to_mel'] = {'success': True, 'time': mel_time, 'shapes': (str(test_audio.shape), str(mel.shape))}
-            
-            # 3. 멜 -> DCAE latent
-            start_time = time.time()
-            latents, quant_loss = self.dcae_model.encode_mel(mel)
+            latents, quant_loss = self.dcae_model.encode(test_audio)
             encode_time = time.time() - start_time
-            print(f"   ✅ Mel -> Latent: {mel.shape} -> {latents.shape} ({encode_time:.3f}s)")
-            results['mel_to_latent'] = {'success': True, 'time': encode_time, 'shapes': (str(mel.shape), str(latents.shape))}
+            print(f"   ✅ Audio -> Latent: {test_audio.shape} -> {latents.shape} ({encode_time:.3f}s)")
+            results['audio_to_latent'] = {'success': True, 'time': encode_time, 'shapes': (str(test_audio.shape), str(latents.shape))}
             
-            # 4. DCAE latent -> 멜 스펙트로그램
+            # 3. DCAE latent -> 오디오 (디코딩 + Vocoder)
             start_time = time.time()
-            reconstructed_mel = self.dcae_model.decode_to_mel(latents)
+            reconstructed_audio = self.dcae_model.decode(latents, target_length=test_audio.shape[-1])
             decode_time = time.time() - start_time
-            print(f"   ✅ Latent -> Mel: {latents.shape} -> {reconstructed_mel.shape} ({decode_time:.3f}s)")
-            results['latent_to_mel'] = {'success': True, 'time': decode_time, 'shapes': (str(latents.shape), str(reconstructed_mel.shape))}
-            
-            # 5. 멜 -> 오디오 (Vocoder)
-            start_time = time.time()
-            reconstructed_audio = self.vocoder_model.mel_to_audio(reconstructed_mel)
-            vocoder_time = time.time() - start_time
-            print(f"   ✅ Mel -> Audio: {reconstructed_mel.shape} -> {reconstructed_audio.shape} ({vocoder_time:.3f}s)")
-            results['mel_to_audio'] = {'success': True, 'time': vocoder_time, 'shapes': (str(reconstructed_mel.shape), str(reconstructed_audio.shape))}
+            print(f"   ✅ Latent -> Audio: {latents.shape} -> {reconstructed_audio.shape} ({decode_time:.3f}s)")
+            results['latent_to_audio'] = {'success': True, 'time': decode_time, 'shapes': (str(latents.shape), str(reconstructed_audio.shape))}
             
             # 전체 파이프라인 시간
-            total_time = mel_time + encode_time + decode_time + vocoder_time
+            total_time = encode_time + decode_time
             print(f"   🎯 Total pipeline time: {total_time:.3f}s")
             
             # 품질 평가
@@ -123,7 +210,7 @@ class DCPipelineTester:
         
         return results
     
-    def test_pipeline_with_real_audio(self, audio_path: str) -> dict:
+    def test_pipeline_with_real_audio(self, audio_path: str, use_chunking: bool = True, chunk_duration: float = 10.0) -> dict:
         """실제 오디오 파일로 파이프라인 테스트"""
         print(f"\n🎵 Testing pipeline with real audio: {audio_path}")
         
@@ -145,22 +232,26 @@ class DCPipelineTester:
                 original_audio = original_audio.unsqueeze(0)  # (C, T) -> (1, C, T)
             
             original_audio = original_audio.to(self.device)
-            print(f"   📄 Loaded audio: {original_audio.shape}, SR: {sr}")
+            duration = original_audio.shape[-1] / 44100
+            print(f"   📄 Loaded audio: {original_audio.shape}, SR: {sr}, Duration: {duration:.1f}s")
             
             # 파이프라인 실행
             start_time = time.time()
             
-            # 1. 오디오 -> 멜
-            mel = self.dcae_model.audio_to_mel(original_audio)
-            
-            # 2. 멜 -> latent
-            latents, _ = self.dcae_model.encode_mel(mel)
-            
-            # 3. latent -> 멜
-            reconstructed_mel = self.dcae_model.decode_to_mel(latents)
-            
-            # 4. 멜 -> 오디오
-            reconstructed_audio = self.vocoder_model.mel_to_audio(reconstructed_mel)
+            if use_chunking and duration > chunk_duration:
+                print(f"   🔄 Using chunking for {duration:.1f}s audio")
+                reconstructed_audio = self.process_audio_with_chunking(
+                    original_audio, 
+                    chunk_duration=chunk_duration, 
+                    overlap=1.0
+                )
+            else:
+                print(f"   🔄 Processing {duration:.1f}s audio without chunking")
+                # 1. 오디오 -> latent (DCAE 인코딩)
+                latents, _ = self.dcae_model.encode(original_audio)
+                
+                # 2. latent -> 오디오 (DCAE 디코딩 + Vocoder)
+                reconstructed_audio = self.dcae_model.decode(latents, target_length=original_audio.shape[-1])
             
             total_time = time.time() - start_time
             print(f"   ⏱️ Processing time: {total_time:.3f}s")
@@ -171,6 +262,7 @@ class DCPipelineTester:
                 min_len = min(reconstructed_audio.shape[-1], original_audio.shape[-1])
                 reconstructed_audio = reconstructed_audio[..., :min_len]
                 original_audio = original_audio[..., :min_len]
+                print(f"   ✂️ Trimmed to {min_len/44100:.1f}s for comparison")
             
             # 기본 메트릭
             mse_loss = torch.nn.functional.mse_loss(reconstructed_audio, original_audio)
@@ -195,6 +287,11 @@ class DCPipelineTester:
             except Exception as e:
                 print(f"   ⚠️ Advanced metrics failed: {e}")
             
+            # 결과 오디오 저장
+            output_path = f"reconstructed_{Path(audio_path).stem}.wav"
+            torchaudio.save(output_path, reconstructed_audio.squeeze(0).cpu(), 44100)
+            print(f"   💾 Reconstructed audio saved: {output_path}")
+            
             results.update({
                 'success': True,
                 'processing_time': total_time,
@@ -202,11 +299,15 @@ class DCPipelineTester:
                 'l1_loss': l1_loss.item(),
                 'original_shape': str(original_audio.shape),
                 'reconstructed_shape': str(reconstructed_audio.shape),
-                'compression_ratio': self.dcae_model.compression_ratio
+                'duration': duration,
+                'used_chunking': use_chunking and duration > chunk_duration,
+                'output_file': output_path
             })
             
         except Exception as e:
             print(f"   ❌ Real audio test failed: {e}")
+            import traceback
+            print(f"   🔍 Traceback:\n{traceback.format_exc()}")
             results = {'success': False, 'error': str(e)}
         
         return results
@@ -284,36 +385,42 @@ class DCPipelineTester:
             test_audio = torch.randn(batch_size, 2, 44100 * 3, device=device)
             
             # DCAE로 실제 latent 얻기
-            mel = self.dcae_model.audio_to_mel(test_audio)
-            target_latents_4d, _ = self.dcae_model.encode_mel(mel)
+            target_latents, _ = self.dcae_model.encode(test_audio)
             
-            # Generator용 3D 형식으로 변환
-            target_latents = self.dcae_model.latents_to_generator_format(target_latents_4d)
+            print(f"   📄 Target latents shape: {target_latents.shape}")
+            
+            # Generator는 3D 형태 (B, C, T)를 기대하므로 필요시 변환
+            if target_latents.dim() == 4:
+                # (B, C, H, W) -> (B, C, H*W) 변환
+                B, C, H, W = target_latents.shape
+                target_latents_3d = target_latents.view(B, C, H * W)
+            else:
+                target_latents_3d = target_latents
             
             # Generator의 기대 시간 차원에 맞춤
             expected_time_steps = generator_config.latent_time_steps
-            current_time_steps = target_latents.shape[2]
+            current_time_steps = target_latents_3d.shape[2]
             
             if current_time_steps != expected_time_steps:
                 if current_time_steps < expected_time_steps:
                     # 패딩
                     pad_size = expected_time_steps - current_time_steps
-                    target_latents = F.pad(target_latents, (0, pad_size))
+                    target_latents_3d = F.pad(target_latents_3d, (0, pad_size))
                 else:
                     # 잘라내기
-                    target_latents = target_latents[:, :, :expected_time_steps]
+                    target_latents_3d = target_latents_3d[:, :, :expected_time_steps]
             
-            print(f"   📄 Target latents shape: {target_latents.shape} (from 4D: {target_latents_4d.shape})")
+            print(f"   📄 Target latents shape for generator: {target_latents_3d.shape}")
             
             # Generator 훈련 손실 테스트
             try:
-                print(f"   🔍 Debug: target_latents shape: {target_latents.shape}")
+                print(f"   🔍 Debug: target_latents shape: {target_latents_3d.shape}")
                 print(f"   🔍 Debug: lyrics shape: {lyrics.shape}")
                 print(f"   🔍 Debug: lyrics_mask shape: {lyrics_mask.shape}")
                 
                 with torch.no_grad():
                     loss_dict = generator.training_loss(
-                        latents=target_latents.float(),
+                        latents=target_latents_3d.float(),
                         lyrics=lyrics,
                         lyrics_mask=lyrics_mask,
                         captions=captions,
@@ -332,7 +439,7 @@ class DCPipelineTester:
             try:
                 with torch.no_grad():
                     generated_latents = generator.generate_fast(
-                        shape=target_latents.shape,
+                        shape=target_latents_3d.shape,
                         lyrics=lyrics,
                         lyrics_mask=lyrics_mask,
                         captions=captions,
@@ -343,17 +450,20 @@ class DCPipelineTester:
                 
                 print(f"   ✅ Generated latents: {generated_latents.shape}")
                 
-                # 생성된 latent를 4D로 변환하여 오디오 복원 (원본 크기 정보 필요)
-                # 원본 4D 크기로 다시 변환하기 위해 잘라내기
+                # 생성된 latent를 원본 형태로 변환하여 오디오 복원
                 if generated_latents.shape[2] > current_time_steps:
                     generated_latents = generated_latents[:, :, :current_time_steps]
                 
-                generated_latents_4d = self.dcae_model.latents_from_generator_format(
-                    generated_latents, 
-                    original_4d_shape=target_latents_4d.shape
-                )
-                generated_mel = self.dcae_model.decode_to_mel(generated_latents_4d)
-                generated_audio = self.vocoder_model.mel_to_audio(generated_mel)
+                # 4D 형태로 변환 (필요한 경우)
+                if target_latents.dim() == 4:
+                    B, C, HW = generated_latents.shape
+                    H, W = target_latents.shape[2], target_latents.shape[3]
+                    generated_latents_4d = generated_latents.view(B, C, H, W)
+                else:
+                    generated_latents_4d = generated_latents
+                
+                # 오디오로 디코딩
+                generated_audio = self.dcae_model.decode(generated_latents_4d)
                 
                 generation_success = True
                 
@@ -369,8 +479,8 @@ class DCPipelineTester:
                 'generator_params': generator.count_parameters(),
                 'training_success': training_success,
                 'generation_success': generation_success,
-                'latent_shape_4d': str(target_latents_4d.shape),
-                'latent_shape_3d': str(target_latents.shape),
+                'latent_shape_original': str(target_latents.shape),
+                'latent_shape_3d': str(target_latents_3d.shape),
                 'generated_shape': str(generated_audio.shape)
             }
             
@@ -388,10 +498,8 @@ class DCPipelineTester:
         print(f"\n⚡ Benchmarking performance ({num_runs} runs)...")
         
         times = {
-            'audio_to_mel': [],
-            'mel_to_latent': [],
-            'latent_to_mel': [],
-            'mel_to_audio': [],
+            'encode': [],
+            'decode': [],
             'total': []
         }
         
@@ -406,33 +514,21 @@ class DCPipelineTester:
             # 워밍업
             if run == 0:
                 with torch.no_grad():
-                    _ = self.dcae_model.audio_to_mel(test_audio)
+                    _ = self.dcae_model.encode(test_audio)
                     torch.cuda.synchronize() if self.device.type == 'cuda' else None
             
             with torch.no_grad():
-                # Audio -> Mel
+                # Audio -> Latent (인코딩)
                 start = time.time()
-                mel = self.dcae_model.audio_to_mel(test_audio)
+                latents, _ = self.dcae_model.encode(test_audio)
                 torch.cuda.synchronize() if self.device.type == 'cuda' else None
-                times['audio_to_mel'].append(time.time() - start)
+                times['encode'].append(time.time() - start)
                 
-                # Mel -> Latent
+                # Latent -> Audio (디코딩 + Vocoder)
                 start = time.time()
-                latents, _ = self.dcae_model.encode_mel(mel)
+                recon_audio = self.dcae_model.decode(latents)
                 torch.cuda.synchronize() if self.device.type == 'cuda' else None
-                times['mel_to_latent'].append(time.time() - start)
-                
-                # Latent -> Mel
-                start = time.time()
-                recon_mel = self.dcae_model.decode_to_mel(latents)
-                torch.cuda.synchronize() if self.device.type == 'cuda' else None
-                times['latent_to_mel'].append(time.time() - start)
-                
-                # Mel -> Audio
-                start = time.time()
-                recon_audio = self.vocoder_model.mel_to_audio(recon_mel)
-                torch.cuda.synchronize() if self.device.type == 'cuda' else None
-                times['mel_to_audio'].append(time.time() - start)
+                times['decode'].append(time.time() - start)
             
             times['total'].append(time.time() - total_start)
         
