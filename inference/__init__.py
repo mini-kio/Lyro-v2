@@ -22,6 +22,7 @@ __all__ = [
     'GenerationConfig', 
     'GenerationInput',
     'create_simple_pipeline',
+    'quick_generate',
     
     # Generators
     'LyroGenerator',
@@ -35,7 +36,7 @@ def create_simple_pipeline(
     generator_checkpoint: str,
     device: str = "auto"
 ):
-    """간단한 파이프라인 생성 헬퍼"""
+    """간단한 파이프라인 생성 헬퍼 (DCAE + Vocoder 포함)"""
     from training.config import LyroConfig
     
     # 기본 설정
@@ -46,11 +47,11 @@ def create_simple_pipeline(
         import torch
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # 파이프라인 생성
-    pipeline = LyroPipeline.from_checkpoints(
-        dcae_checkpoint=dcae_checkpoint,
+    # DCAE + Vocoder 파이프라인 생성
+    pipeline = LyroPipeline.from_pretrained(
+        dcae_model_name=dcae_checkpoint,
         generator_checkpoint=generator_checkpoint,
-        config=config,
+        cache_dir="checkpoints",
         device=device
     )
     
@@ -65,7 +66,7 @@ def quick_generate(
     duration: float = 10.0,
     output_path: str = None
 ):
-    """빠른 생성 헬퍼 함수"""
+    """빠른 생성 헬퍼 함수 (올바른 DCAE + Vocoder 파이프라인)"""
     # 파이프라인 생성
     pipeline = create_simple_pipeline(dcae_checkpoint, generator_checkpoint)
     

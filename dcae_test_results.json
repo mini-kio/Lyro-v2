@@ -1,0 +1,118 @@
+{
+  "test_info": {
+    "dcae_model": "ACE-Step/ACE-Step-v1-3.5B",
+    "device": "cpu",
+    "timestamp": 1751523048.408765
+  },
+  "basic_pipeline": {
+    "audio_to_mel": {
+      "success": true,
+      "time": 0.0037369728088378906,
+      "shapes": [
+        "torch.Size([1, 2, 132300])",
+        "torch.Size([1, 2, 128, 260])"
+      ]
+    },
+    "mel_to_latent": {
+      "success": true,
+      "time": 0.3144519329071045,
+      "shapes": [
+        "torch.Size([1, 2, 128, 260])",
+        "torch.Size([1, 16, 16, 16])"
+      ]
+    },
+    "latent_to_mel": {
+      "success": true,
+      "time": 0.0,
+      "shapes": [
+        "torch.Size([1, 16, 16, 16])",
+        "torch.Size([1, 2, 128, 256])"
+      ]
+    },
+    "mel_to_audio": {
+      "success": true,
+      "time": 0.3431246280670166,
+      "shapes": [
+        "torch.Size([1, 2, 128, 256])",
+        "torch.Size([1, 4, 65536])"
+      ]
+    },
+    "total_time": 0.661313533782959,
+    "pipeline_success": true
+  },
+  "compression": {
+    "1.0s": {
+      "original_size": 22528,
+      "compressed_size": 0,
+      "compression_ratio": 22528.0,
+      "latent_shape": null,
+      "mel_shape": [
+        1,
+        2,
+        128,
+        88
+      ],
+      "success": true
+    },
+    "3.0s": {
+      "original_size": 66560,
+      "compressed_size": 4096,
+      "compression_ratio": 16.25,
+      "latent_shape": [
+        1,
+        16,
+        16,
+        16
+      ],
+      "mel_shape": [
+        1,
+        2,
+        128,
+        260
+      ],
+      "success": true
+    },
+    "5.0s": {
+      "original_size": 110592,
+      "compressed_size": 0,
+      "compression_ratio": 110592.0,
+      "latent_shape": null,
+      "mel_shape": [
+        1,
+        2,
+        128,
+        432
+      ],
+      "success": true
+    },
+    "10.0s": {
+      "original_size": 220672,
+      "compressed_size": 4096,
+      "compression_ratio": 53.875,
+      "latent_shape": [
+        1,
+        16,
+        16,
+        16
+      ],
+      "mel_shape": [
+        1,
+        2,
+        128,
+        862
+      ],
+      "success": true
+    },
+    "success": true
+  },
+  "generator_integration": {
+    "success": true,
+    "generator_params": 45699600,
+    "training_success": true,
+    "generation_success": true,
+    "latent_shape_4d": "torch.Size([1, 16, 16, 16])",
+    "latent_shape_3d": "torch.Size([1, 16, 256])",
+    "generated_shape": "torch.Size([1, 4, 65536])",
+    "flow_loss": 2.0460944175720215
+  }
+}

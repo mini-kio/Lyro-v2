@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 LYRO 음악 생성 스크립트
-훈련된 DCAE + Generator 모델을 사용한 음악 생성
+훈련된 DCAE + Vocoder + Generator 모델을 사용한 음악 생성
+올바른 파이프라인: latents -> mel (DCAE) -> audio (Vocoder)
 """
 
 import os
@@ -176,7 +177,8 @@ def generate_single(
                     'sample_rate': result['sample_rate'],
                     'duration': result['duration'],
                     'channels': result['audio'].shape[0] if hasattr(result['audio'], 'shape') else 2
-                }
+                },
+                'pipeline': 'latents->dcae_mel->vocoder_audio'
             }
             
             metadata_path = output_dir / f"{prompt_id}.json"
@@ -202,10 +204,10 @@ def generate_single(
 
 
 def main():
-    parser = argparse.ArgumentParser(description='LYRO Music Generation')
+    parser = argparse.ArgumentParser(description='LYRO Music Generation (DCAE + Vocoder)')
     
     # 모델 체크포인트
-    parser.add_argument('--dcae_checkpoint', type=str, required=True, help='DCAE checkpoint path')
+    parser.add_argument('--dcae_checkpoint', type=str, default='ACE-Step/ACE-Step-v1-3.5B', help='DCAE model name')
     parser.add_argument('--generator_checkpoint', type=str, required=True, help='Generator checkpoint path')
     
     # 생성 설정
@@ -238,8 +240,8 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # 파이프라인 생성
-    logger.info("Loading models...")
+    # 파이프라인 생성 (DCAE + Vocoder 포함)
+    logger.info("Loading models (DCAE + Vocoder + Generator)...")
     try:
         pipeline = create_simple_pipeline(
             dcae_checkpoint=args.dcae_checkpoint,
@@ -248,11 +250,12 @@ def main():
         )
         
         generator = LyroGenerator(pipeline)
-        logger.info("✅ Models loaded successfully")
+        logger.info("✅ Models loaded successfully with corrected pipeline")
         
         # 모델 정보 출력
         model_info = pipeline.get_model_info()
         logger.info(f"Model info: {model_info}")
+        logger.info(f"Pipeline: {model_info.get('pipeline_architecture', 'latents->mel->audio')}")
         
     except Exception as e:
         logger.error(f"❌ Failed to load models: {e}")
@@ -292,7 +295,7 @@ def main():
         logger.info("No prompts provided, using examples")
         prompts = create_example_prompts()
     
-    logger.info(f"Generating {len(prompts)} samples...")
+    logger.info(f"Generating {len(prompts)} samples with corrected DCAE+Vocoder pipeline...")
     
     # 생성 실행
     results = []
@@ -316,11 +319,12 @@ def main():
     successful = [r for r in results if r['success']]
     failed = [r for r in results if not r['success']]
     
-    logger.info(f"\n🎵 Generation Summary:")
+    logger.info(f"\n🎵 Generation Summary (DCAE + Vocoder Pipeline):")
     logger.info(f"   ✅ Successful: {len(successful)}")
     logger.info(f"   ❌ Failed: {len(failed)}")
     logger.info(f"   ⏱️ Total time: {total_time:.2f}s")
     logger.info(f"   📁 Output directory: {output_dir}")
+    logger.info(f"   🔧 Pipeline: latents -> DCAE mel -> Vocoder audio")
     
     if successful:
         avg_time = sum(r['generation_time'] for r in successful) / len(successful)
@@ -340,6 +344,7 @@ def main():
         'total_time': total_time,
         'average_time': avg_time if successful else 0,
         'config': generation_config.__dict__,
+        'pipeline': 'corrected DCAE + Vocoder',
         'results': results
     }
     

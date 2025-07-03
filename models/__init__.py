@@ -1,8 +1,8 @@
 """
-LYRO Models Package (프리트레인된 DCAE + Generator 훈련)
+LYRO Models Package (프리트레인된 DCAE + Vocoder + Generator 훈련)
 """
 
-from .dcae import PretrainedDCAE, create_dcae_model
+from .dcae import PretrainedDCAE, AdvancedVocoder, create_dcae_model, create_vocoder_model
 from .generator import LyroGenerator, GeneratorConfig, create_lyro_generator
 from .ssm_flow import SSMFlowGenerator, create_ssm_flow_generator
 from .encoders import CaptionEncoder, LyricsEncoder, ReferenceEncoder
@@ -15,9 +15,11 @@ from .losses import (
 )
 
 __all__ = [
-    # Pretrained DCAE
+    # Pretrained DCAE + Vocoder
     'PretrainedDCAE',
+    'AdvancedVocoder',
     'create_dcae_model',
+    'create_vocoder_model',
     
     # Generator
     'LyroGenerator',
@@ -45,7 +47,7 @@ __all__ = [
 
 def create_lyro_models(config):
     """
-    LYRO 모델 스위트 생성 (프리트레인된 DCAE + 훈련할 Generator)
+    LYRO 모델 스위트 생성 (프리트레인된 DCAE + Vocoder + 훈련할 Generator)
     
     Args:
         config: 모델 설정
@@ -59,6 +61,13 @@ def create_lyro_models(config):
     models['dcae'] = create_dcae_model(
         model_name=config.dcae.model_name,
         subfolder=config.dcae.subfolder,
+        cache_dir=config.dcae.cache_dir,
+        sample_rate=config.dcae.sample_rate
+    )
+    
+    # 프리트레인된 Vocoder (훈련하지 않음)
+    models['vocoder'] = create_vocoder_model(
+        model_name=config.dcae.model_name,
         cache_dir=config.dcae.cache_dir,
         sample_rate=config.dcae.sample_rate
     )
@@ -150,6 +159,12 @@ def get_model_info():
             'compression_ratio': '~50:1',
             'trainable': False
         },
+        'vocoder': {
+            'type': 'Pretrained ACE-Step Vocoder',
+            'model_name': 'ACE-Step/ACE-Step-v1-3.5B',
+            'sample_rate': 44100,
+            'trainable': False
+        },
         'ssm_generator': {
             'parameters': '~1.5B', 
             'architecture': 'S6 + Flow Matching',
@@ -161,5 +176,6 @@ def get_model_info():
             'lyrics': 'Custom Tokenizer + Embedding',
             'reference': 'DCAE-based'
         },
+        'pipeline': 'audio->mel->dcae_latent->generator->dcae_mel->vocoder->audio',
         'total_trainable_parameters': '~1.5B'
     }

@@ -163,17 +163,19 @@ class LyroTokenizer:
 
 
 class LyroCollator:
-    """LYRO 데이터 콜레이터"""
+    """LYRO 데이터 콜레이터 (수정됨)"""
     
-    def __init__(self, config: ProcessorConfig = None, tokenizer: LyroTokenizer = None):
+    def __init__(self, tokenizer: LyroTokenizer = None, config: ProcessorConfig = None, **kwargs):
+        # 기존 매개변수 지원
+        self.tokenizer = tokenizer or LyroTokenizer()
         self.config = config or ProcessorConfig()
-        self.tokenizer = tokenizer or LyroTokenizer(
-            vocab_size=self.config.vocab_size,
-            max_length=self.config.max_lyrics_length
-        )
+        
+        # kwargs에서 직접 설정 가져오기 (하위호환성)
+        self.max_audio_length = kwargs.get('max_audio_length', self.config.max_audio_length)
+        self.max_text_length = kwargs.get('max_text_length', self.config.max_lyrics_length)
     
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        """배치 처리"""
+        """배치 처리 (수정됨)"""
         batch_size = len(batch)
         
         collated = {
@@ -219,7 +221,7 @@ class LyroCollator:
         for item in batch:
             audio = item.get('audio')
             if audio is None:
-                audio = torch.zeros(2, self.config.max_audio_length)
+                audio = torch.zeros(2, self.max_audio_length)
                 length = 0
             else:
                 if isinstance(audio, np.ndarray):
@@ -242,13 +244,17 @@ class LyroCollator:
         }
     
     def _collate_text(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
-        """텍스트 배치 처리"""
+        """텍스트 배치 처리 (수정됨)"""
         lyrics_texts = []
         caption_texts = []
         
         for item in batch:
-            lyrics_texts.append(item.get('lyrics', ''))
-            caption_texts.append(item.get('caption', ''))
+            # 다양한 키 이름 지원
+            lyrics = item.get('lyrics_text', item.get('lyrics', ''))
+            caption = item.get('caption_text', item.get('caption', ''))
+            
+            lyrics_texts.append(lyrics if lyrics else '')
+            caption_texts.append(caption if caption else '')
         
         # 가사 토크나이징
         lyrics_tokens = self.tokenizer.batch_encode(lyrics_texts, 'lyrics')
@@ -296,7 +302,7 @@ class LyroCollator:
         for item in batch:
             ref_audio = item.get('reference_audio')
             if ref_audio is None:
-                ref_audio = torch.zeros(2, self.config.max_audio_length)
+                ref_audio = torch.zeros(2, self.max_audio_length)
                 length = 0
             else:
                 if isinstance(ref_audio, np.ndarray):
@@ -346,13 +352,13 @@ class LyroCollator:
         """오디오 길이 조정"""
         current_length = audio.shape[-1]
         
-        if current_length > self.config.max_audio_length:
+        if current_length > self.max_audio_length:
             # 랜덤 크롭
-            start_idx = torch.randint(0, current_length - self.config.max_audio_length + 1, (1,)).item()
-            audio = audio[..., start_idx:start_idx + self.config.max_audio_length]
-        elif current_length < self.config.max_audio_length:
+            start_idx = torch.randint(0, current_length - self.max_audio_length + 1, (1,)).item()
+            audio = audio[..., start_idx:start_idx + self.max_audio_length]
+        elif current_length < self.max_audio_length:
             # 제로 패딩
-            pad_length = self.config.max_audio_length - current_length
+            pad_length = self.max_audio_length - current_length
             audio = F.pad(audio, (0, pad_length))
         
         # pad_to_multiple 적용
@@ -375,7 +381,7 @@ class DataProcessor:
             vocab_size=self.config.vocab_size,
             max_length=self.config.max_lyrics_length
         )
-        self.collator = LyroCollator(self.config, self.tokenizer)
+        self.collator = LyroCollator(self.tokenizer, self.config)
     
     def process_single_sample(self, sample: Dict[str, Any]) -> Dict[str, Any]:
         """단일 샘플 처리"""
@@ -475,6 +481,6 @@ def create_tokenizer(vocab_size: int = 32000, max_length: int = 512) -> LyroToke
     return LyroTokenizer(vocab_size, max_length)
 
 
-def create_collator(config: ProcessorConfig = None, tokenizer: LyroTokenizer = None) -> LyroCollator:
-    """콜레이터 생성"""
-    return LyroCollator(config, tokenizer)
+def create_collator(tokenizer: LyroTokenizer = None, config: ProcessorConfig = None, **kwargs) -> LyroCollator:
+    """콜레이터 생성 (하위호환성 지원)"""
+    return LyroCollator(tokenizer, config, **kwargs)

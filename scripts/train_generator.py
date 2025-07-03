@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-LYRO Generator 훈련 스크립트 (프리트레인된 DCAE 사용)
+LYRO Generator 훈련 스크립트 (프리트레인된 DCAE + Vocoder 사용)
 1.5B 파라미터 SSM + Flow Matching + REPA Loss
+올바른 파이프라인: 오디오 -> 멜 -> DCAE latent -> Generator -> DCAE mel -> Vocoder -> 오디오
 """
 
 import os
@@ -20,6 +21,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 수정된 imports
 from models import create_lyro_generator, create_dcae_model
+from models.dcae import create_vocoder_model  # Vocoder import 추가
 from models.losses import CombinedLoss, FlowMatchingLoss, REPALoss, ReconstructionLoss, PerceptualLoss
 from data import create_lyro_datasets, LyroCollator, LyroTokenizer
 from training.config import LyroConfig
@@ -31,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 class LyroGeneratorTrainer:
-    """LYRO Generator 트레이너 (프리트레인된 DCAE 사용)"""
+    """LYRO Generator 트레이너 (프리트레인된 DCAE + Vocoder 사용)"""
     
     def __init__(self, config: LyroConfig):
         self.config = config
@@ -39,6 +41,9 @@ class LyroGeneratorTrainer:
         
         # 프리트레인된 DCAE 모델 로드 (훈련하지 않음)
         self.dcae_model = self._load_pretrained_dcae()
+        
+        # 프리트레인된 Vocoder 모델 로드 (훈련하지 않음)
+        self.vocoder_model = self._load_pretrained_vocoder()
         
         # Generator 모델 생성 (1.5B 파라미터, 훈련 대상)
         self.generator_model = self._create_generator()
@@ -73,6 +78,8 @@ class LyroGeneratorTrainer:
         logger.info(f"LYRO Generator Trainer initialized on {self.device}")
         logger.info(f"Generator parameters: {self._count_parameters(self.generator_model):,}")
         logger.info(f"DCAE parameters (frozen): {self._count_parameters(self.dcae_model):,}")
+        logger.info(f"Vocoder parameters (frozen): {self._count_parameters(self.vocoder_model):,}")
+        logger.info("Pipeline: audio->mel->dcae_latent->generator->dcae_mel->vocoder->audio")
     
     def _load_pretrained_dcae(self):
         """프리트레인된 DCAE 모델 로드"""
@@ -88,6 +95,20 @@ class LyroGeneratorTrainer:
         
         logger.info(f"Loaded pretrained DCAE: {self.config.dcae.model_name}")
         return dcae_model
+    
+    def _load_pretrained_vocoder(self):
+        """프리트레인된 Vocoder 모델 로드"""
+        vocoder_model = create_vocoder_model(
+            model_name=self.config.dcae.model_name,
+            cache_dir=self.config.dcae.cache_dir
+        ).to(self.device).eval()
+        
+        # 파라미터 고정
+        for param in vocoder_model.parameters():
+            param.requires_grad = False
+        
+        logger.info(f"Loaded pretrained Vocoder: {self.config.dcae.model_name}")
+        return vocoder_model
     
     def _create_generator(self):
         """1.5B 파라미터 Generator 생성"""
@@ -158,7 +179,7 @@ class LyroGeneratorTrainer:
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
     
     def train_step(self, batch):
-        """훈련 스텝"""
+        """훈련 스텝 (올바른 DCAE + Vocoder 파이프라인)"""
         # 데이터 준비
         audio = batch['audio'].to(self.device, dtype=torch.float16)
         lyrics = batch.get('lyrics')
@@ -166,10 +187,14 @@ class LyroGeneratorTrainer:
         captions = batch.get('captions')
         task_types = batch.get('task_types', ['SONG'] * audio.shape[0])
         
-        # 프리트레인된 DCAE로 잠재 벡터 인코딩
+        # 올바른 파이프라인: 오디오 -> 멜 -> DCAE latent
         with torch.no_grad():
             try:
-                latents, _ = self.dcae_model.encode(audio.float())
+                # Step 1: 오디오 -> 멜 스펙트로그램
+                mel_target = self.dcae_model.audio_to_mel(audio.float())
+                
+                # Step 2: 멜 -> DCAE latent
+                latents, _ = self.dcae_model.encode_mel(mel_target.float())
                 latents = latents.half()
             except Exception as e:
                 logger.error(f"DCAE encoding failed: {e}")
@@ -188,12 +213,17 @@ class LyroGeneratorTrainer:
             
             flow_loss = loss_dict['flow_loss']
             
-            # 추가 손실 계산을 위해 샘플 생성
+            # 추가 손실 계산을 위해 오디오 생성 (올바른 파이프라인)
             try:
                 # 간단한 생성 (한 스텝)
                 with torch.no_grad():
                     generated_latents = latents + 0.1 * loss_dict.get('predicted_v', torch.zeros_like(latents))
-                    generated_audio = self.dcae_model.decode(generated_latents.float()).half()
+                    
+                    # latents -> mel (DCAE 디코딩)
+                    generated_mel = self.dcae_model.decode_to_mel(generated_latents.float())
+                    
+                    # mel -> audio (Vocoder)
+                    generated_audio = self.vocoder_model.mel_to_audio(generated_mel).half()
                 
                 # 추가 손실들 계산
                 additional_losses = self.loss_fn(
@@ -244,7 +274,7 @@ class LyroGeneratorTrainer:
         return result_dict
     
     def validate_step(self, batch):
-        """검증 스텝"""
+        """검증 스텝 (올바른 파이프라인)"""
         audio = batch['audio'].to(self.device, dtype=torch.float16)
         lyrics = batch.get('lyrics')
         lyrics_mask = batch.get('lyrics_mask')
@@ -252,9 +282,17 @@ class LyroGeneratorTrainer:
         task_types = batch.get('task_types', ['SONG'] * audio.shape[0])
         
         with torch.no_grad():
-            # 프리트레인된 DCAE 인코딩
-            latents, _ = self.dcae_model.encode(audio.float())
-            latents = latents.half()
+            # 올바른 파이프라인: 오디오 -> 멜 -> DCAE latent
+            try:
+                # Step 1: 오디오 -> 멜
+                mel_target = self.dcae_model.audio_to_mel(audio.float())
+                
+                # Step 2: 멜 -> DCAE latent
+                latents, _ = self.dcae_model.encode_mel(mel_target.float())
+                latents = latents.half()
+            except Exception as e:
+                logger.error(f"DCAE encoding failed during validation: {e}")
+                return None
             
             # Generator 검증
             with autocast():
@@ -273,7 +311,7 @@ class LyroGeneratorTrainer:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='LYRO Generator Training (with Pretrained DCAE)')
+    parser = argparse.ArgumentParser(description='LYRO Generator Training (with Pretrained DCAE + Vocoder)')
     
     # 기본 설정
     parser.add_argument('--config', type=str, default=None, help='Config file path')
@@ -309,8 +347,8 @@ def main():
         config.dcae.model_name = args.dcae_model_name
         config.dcae.cache_dir = args.dcae_cache_dir
     
-    logger.info("Starting LYRO Generator Training (with Pretrained DCAE)")
-    logger.info(f"Pretrained DCAE: {config.dcae.model_name}")
+    logger.info("Starting LYRO Generator Training (with Pretrained DCAE + Vocoder)")
+    logger.info(f"Pretrained DCAE + Vocoder: {config.dcae.model_name}")
     
     # 토크나이저
     tokenizer = LyroTokenizer(vocab_size=32000)
@@ -355,121 +393,58 @@ def main():
         collate_fn=collator
     )
     
-    # 트레이너 생성
-    trainer = LyroGeneratorTrainer(config)
+    # 프리트레인된 모델들 로드
+    dcae_model = create_dcae_model(
+        model_type="pretrained",
+        model_name=config.dcae.model_name,
+        cache_dir=config.dcae.cache_dir
+    )
+    
+    vocoder_model = create_vocoder_model(
+        model_name=config.dcae.model_name,
+        cache_dir=config.dcae.cache_dir
+    )
+    
+    # Generator 생성
+    generator_model = create_lyro_generator(
+        latent_channels=config.generator.latent_channels,
+        latent_size=config.generator.latent_time_steps,
+        d_model=config.generator.d_model,
+        n_layers=config.generator.n_layers,
+        d_state=config.generator.d_state,
+        condition_dims={
+            'lyrics': config.encoder.lyrics_embed_dim,
+            'caption': config.encoder.caption_embed_dim,
+            'reference': config.generator.latent_channels * config.generator.latent_time_steps
+        },
+        dropout=0.1
+    )
+    
+    # 트레이너 생성 (수정된 create_trainer 사용)
+    trainer = create_trainer(
+        config=config,
+        model=generator_model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        dcae_model=dcae_model,
+        vocoder_model=vocoder_model
+    )
     
     # 체크포인트 디렉토리 생성
     checkpoint_dir = Path(config.training.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     
-    # 훈련 루프
-    best_val_loss = float('inf')
+    # 훈련 시작
+    logger.info("Starting training with corrected DCAE + Vocoder pipeline...")
     
-    logger.info("Starting training loop...")
+    # 체크포인트에서 재개
+    if args.resume:
+        trainer.resume_from_checkpoint(args.resume)
     
-    for epoch in range(config.generator.epochs):
-        # 훈련
-        trainer.generator_model.train()
-        train_losses = []
-        epoch_start_time = time.time()
-        
-        for batch_idx, batch in enumerate(train_loader):
-            try:
-                loss_dict = trainer.train_step(batch)
-                if loss_dict:
-                    train_losses.append(loss_dict)
-                    
-                    if batch_idx % 10 == 0:
-                        logger.info(
-                            f"Epoch {epoch}, Batch {batch_idx}: "
-                            f"Loss={loss_dict['loss']:.4f}, "
-                            f"Flow={loss_dict['flow_loss']:.4f}, "
-                            f"REPA={loss_dict['repa_loss']:.4f}, "
-                            f"Grad={loss_dict['grad_norm']:.3f}"
-                        )
-            except RuntimeError as e:
-                if "out of memory" in str(e).lower():
-                    logger.warning("OOM error, skipping batch")
-                    torch.cuda.empty_cache()
-                    continue
-                else:
-                    logger.error(f"Training step failed: {e}")
-                    continue
-            except Exception as e:
-                logger.error(f"Training step failed: {e}")
-                continue
-        
-        # 검증
-        trainer.generator_model.eval()
-        val_losses = []
-        
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(val_loader):
-                if batch_idx >= 20:  # 검증 배치 제한
-                    break
-                try:
-                    loss_dict = trainer.validate_step(batch)
-                    val_losses.append(loss_dict)
-                except Exception as e:
-                    logger.error(f"Validation step failed: {e}")
-                    continue
-        
-        # 평균 계산
-        epoch_time = time.time() - epoch_start_time
-        
-        if train_losses and val_losses:
-            avg_train_loss = sum(d['loss'].item() for d in train_losses) / len(train_losses)
-            avg_val_loss = sum(d['loss'].item() for d in val_losses) / len(val_losses)
-            
-            logger.info(
-                f"Epoch {epoch} ({epoch_time:.1f}s): "
-                f"Train Loss={avg_train_loss:.4f}, "
-                f"Val Loss={avg_val_loss:.4f}"
-            )
-            
-            # 체크포인트 저장
-            is_best = avg_val_loss < best_val_loss
-            if is_best:
-                best_val_loss = avg_val_loss
-            
-            if epoch % 5 == 0 or is_best:
-                checkpoint_path = checkpoint_dir / f"generator_epoch_{epoch}.pt"
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': trainer.generator_model.state_dict(),
-                    'optimizer_state_dict': trainer.optimizer.state_dict(),
-                    'scheduler_state_dict': trainer.scheduler.state_dict(),
-                    'scaler_state_dict': trainer.scaler.state_dict(),
-                    'config': config,
-                    'metrics': {
-                        'train_loss': avg_train_loss,
-                        'val_loss': avg_val_loss
-                    }
-                }, checkpoint_path)
-                
-                if is_best:
-                    best_path = checkpoint_dir / "generator_best.pt"
-                    torch.save({
-                        'epoch': epoch,
-                        'model_state_dict': trainer.generator_model.state_dict(),
-                        'optimizer_state_dict': trainer.optimizer.state_dict(),
-                        'scheduler_state_dict': trainer.scheduler.state_dict(),
-                        'scaler_state_dict': trainer.scaler.state_dict(),
-                        'config': config,
-                        'metrics': {
-                            'train_loss': avg_train_loss,
-                            'val_loss': avg_val_loss
-                        }
-                    }, best_path)
-                    logger.info(f"💾 Best Generator model saved! Loss: {avg_val_loss:.4f}")
-        
-        # 스케줄러 스텝
-        trainer.scheduler.step()
-        
-        # 메모리 정리
-        torch.cuda.empty_cache()
+    # 훈련 실행
+    final_checkpoint = trainer.train()
     
-    logger.info(f"Training completed! Best Val Loss: {best_val_loss:.4f}")
+    logger.info(f"Training completed! Final checkpoint: {final_checkpoint}")
 
 
 if __name__ == '__main__':
