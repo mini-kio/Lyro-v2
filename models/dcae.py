@@ -57,23 +57,35 @@ def download_checkpoints():
     os.makedirs("checkpoints", exist_ok=True)
     
     try:
+        # DCAE 모델 다운로드
         dcae_path = os.path.join("checkpoints", "music_dcae_f8c8")
-        if not os.path.exists(dcae_path):
+        if not os.path.exists(dcae_path) or not any(f.endswith(('.safetensors', '.bin')) for f in os.listdir(dcae_path) if os.path.isfile(os.path.join(dcae_path, f))):
             print("DCAE 모델 다운로드 중...")
-            snapshot_download(
-                repo_id="ACE-Step/ACE-Step-v1-3.5B",
-                local_dir="checkpoints",
-                allow_patterns=["music_dcae_f8c8/*"],
-            )
+            try:
+                snapshot_download(
+                    repo_id="ACE-Step/ACE-Step-v1-3.5B",
+                    local_dir="checkpoints",
+                    allow_patterns=["music_dcae_f8c8/**"],
+                    ignore_patterns=["*.git*", "*.md", "*.txt"]
+                )
+            except Exception as e:
+                print(f"DCAE 다운로드 실패: {e}")
+                dcae_path = None
         
+        # Vocoder 모델 다운로드
         vocoder_path = os.path.join("checkpoints", "music_vocoder")
-        if not os.path.exists(vocoder_path):
+        if not os.path.exists(vocoder_path) or not any(f.endswith(('.safetensors', '.bin')) for f in os.listdir(vocoder_path) if os.path.isfile(os.path.join(vocoder_path, f))):
             print("Vocoder 모델 다운로드 중...")
-            snapshot_download(
-                repo_id="ACE-Step/ACE-Step-v1-3.5B",
-                local_dir="checkpoints",
-                allow_patterns=["music_vocoder/*"],
-            )
+            try:
+                snapshot_download(
+                    repo_id="ACE-Step/ACE-Step-v1-3.5B",
+                    local_dir="checkpoints",
+                    allow_patterns=["music_vocoder/**"],
+                    ignore_patterns=["*.git*", "*.md", "*.txt"]
+                )
+            except Exception as e:
+                print(f"Vocoder 다운로드 실패: {e}")
+                vocoder_path = None
         
         print("체크포인트 다운로드 완료!")
         return dcae_path, vocoder_path
@@ -122,7 +134,7 @@ class FixedLinearSpectrogram(nn.Module):
 
 class FixedLogMelSpectrogram(nn.Module):
     def __init__(self, sample_rate=44100, n_fft=2048, win_length=2048, hop_length=512,
-                 n_mels=128, center=True, f_min=0.0, f_max=None):
+                 n_mels=128, center=True, f_min=0.0, f_max=None):  # 128 mel bins로 통일
         super().__init__()
         self.sample_rate = sample_rate
         self.n_fft = n_fft
@@ -206,7 +218,7 @@ class CompatibleHiFiGANGenerator(nn.Module):
     """호환성이 개선된 HiFiGAN Generator"""
     
     def __init__(self, 
-                 input_channels: int = 256,  # 2 * 128 (mel channels)
+                 input_channels: int = 128,  # 128 mel channels로 통일
                  hop_length: int = 512, 
                  upsample_rates: Tuple[int] = (4, 4, 2, 2, 2, 2, 2),
                  upsample_kernel_sizes: Tuple[int] = (8, 8, 4, 4, 4, 4, 4),
@@ -221,7 +233,7 @@ class CompatibleHiFiGANGenerator(nn.Module):
         
         # Pre-convolution
         self.conv_pre = weight_norm(Conv1d(
-            input_channels, upsample_initial_channel, 7, 1, padding=3
+            input_channels, upsample_initial_channel, 13, 1, padding=6  # kernel_size=13으로 복원
         ))
 
         # Upsampling layers
@@ -289,14 +301,14 @@ if DIFFUSERS_AVAILABLE:
     class FixedOptimizedADaMoSHiFiGANV1(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         @register_to_config
         def __init__(self, 
-                     input_channels: int = 128, 
+                     input_channels: int = 128,  # 128 mel channels로 통일
                      sampling_rate: int = 44100,
                      n_fft: int = 2048, 
                      win_length: int = 2048, 
                      hop_length: int = 512,
                      f_min: int = 40, 
                      f_max: int = 16000, 
-                     n_mels: int = 128,
+                     n_mels: int = 128,  # 128 mel bins로 통일
                      **kwargs):
             super().__init__()
 
@@ -309,9 +321,9 @@ if DIFFUSERS_AVAILABLE:
                 center=True
             )
             
-            # 호환성이 개선된 Generator 사용
+            # 호환성이 개선된 Generator 사용 - 128 채널
             self.head = CompatibleHiFiGANGenerator(
-                input_channels=256,  # config에서 256 채널을 기대함
+                input_channels=128,  # 128 mel 채널로 통일
                 hop_length=hop_length
             )
             
@@ -361,18 +373,18 @@ if DIFFUSERS_AVAILABLE:
                     # (H, W) -> (1, H, W)
                     mel_tensor = mel_tensor.unsqueeze(0)
                 
-                # 채널 수 조정 (256 채널로 맞춤)
+                # 채널 수 조정 (128 채널로 맞춤 - 128 mel bins)
                 current_channels = mel_tensor.shape[1]
-                if current_channels != 256:
-                    if current_channels < 256:
+                if current_channels != 128:
+                    if current_channels < 128:
                         # 패딩으로 채널 증가
-                        padding_channels = 256 - current_channels
+                        padding_channels = 128 - current_channels
                         padding = torch.zeros(mel_tensor.shape[0], padding_channels, mel_tensor.shape[2], 
                                             device=mel_tensor.device, dtype=mel_tensor.dtype)
                         mel_tensor = torch.cat([mel_tensor, padding], dim=1)
                     else:
                         # 잘라내기로 채널 감소
-                        mel_tensor = mel_tensor[:, :256, :]
+                        mel_tensor = mel_tensor[:, :128, :]
                 
                 # Generator를 통한 오디오 생성
                 audio = self.head(mel_tensor)
@@ -411,8 +423,8 @@ else:
     class FixedOptimizedADaMoSHiFiGANV1(nn.Module):
         def __init__(self, **kwargs):
             super().__init__()
-            self.mel_transform = FixedLogMelSpectrogram()
-            self.head = CompatibleHiFiGANGenerator()
+            self.mel_transform = FixedLogMelSpectrogram(n_mels=128)  # 128 mel bins로 통일
+            self.head = CompatibleHiFiGANGenerator(input_channels=128)  # 128 채널
             self._is_optimized = False
         
         def optimize_for_inference(self):
@@ -476,6 +488,7 @@ class PretrainedDCAE(nn.Module):
         # 설정 정보
         self.latent_channels = 8  # 실제 DCAE 출력 채널
         self.compression_ratio = 50.0
+        self.start_padding_samples = 2048  # 시작 패딩 샘플 수 (46ms @ 44.1kHz)
         
         # 멜 스펙트로그램 변환기
         self.mel_transform = FixedLogMelSpectrogram(
@@ -483,7 +496,7 @@ class PretrainedDCAE(nn.Module):
             n_fft=2048,
             win_length=2048,
             hop_length=512,
-            n_mels=128,
+            n_mels=128,  # 128 mel bins로 통일
             center=True
         )
         
@@ -570,60 +583,32 @@ class PretrainedDCAE(nn.Module):
             return None
     
     def _pad_mel_for_dcae(self, mel: torch.Tensor) -> torch.Tensor:
-        """DCAE 호환성을 위한 멜 스펙트로그램 패딩 (더 철저한 처리)"""
-        # 모든 차원이 2의 배수가 되도록 패딩
+        """DCAE 호환성을 위한 멜 스펙트로그램 패딩 (안전한 방식)"""
+        # 마지막 두 축(H, W)이 2의 배수가 되도록 오른쪽에만 패딩
         padded_mel = mel
         
-        # 각 공간 차원에 대해 2의 배수로 만들기
-        for dim_idx in [-2, -1]:  # 마지막 두 차원 (H, W)
-            current_size = padded_mel.shape[dim_idx]
-            if current_size % 2 != 0:
-                # 패딩 생성
-                padding = [0] * (len(padded_mel.shape) * 2)
-                # 해당 차원의 끝에 1 패딩 추가
-                padding_idx = -(dim_idx + len(padded_mel.shape) + 1) * 2 - 1
-                padding[padding_idx] = 1
-                padded_mel = F.pad(padded_mel, padding, mode='constant', value=0)
+        for axis in (-2, -1):           # H, W
+            size = padded_mel.shape[axis]
+            if size % 2:                # 홀수일 때만
+                pad = (0, 1) if axis == -1 else (0, 0, 0, 1)
+                padded_mel = F.pad(padded_mel, pad, mode='constant', value=0)
         
-        # 최소 크기 보장 (각 차원이 최소 16 - 더 안전한 크기)
-        min_size = 16
+        # 최소 크기 보장 (각 차원이 최소 32 - DCAE 다운샘플링 호환성)
+        min_size = 32
         
         # 시간 차원 (마지막 차원) 패딩
         if padded_mel.shape[-1] < min_size:
             padding_needed = min_size - padded_mel.shape[-1]
-            # 2의 배수로 맞춤
-            if padding_needed % 2 != 0:
-                padding_needed += 1
             padded_mel = F.pad(padded_mel, (0, padding_needed), mode='constant', value=0)
         
         # 주파수 차원 (끝에서 두 번째 차원) 패딩
         if padded_mel.shape[-2] < min_size:
             padding_needed = min_size - padded_mel.shape[-2]
-            # 2의 배수로 맞춤
-            if padding_needed % 2 != 0:
-                padding_needed += 1
             padded_mel = F.pad(padded_mel, (0, 0, 0, padding_needed), mode='constant', value=0)
         
-        # 최종 2의 배수 확인 및 강제 조정
-        for _ in range(10):  # 최대 10번 시도
-            need_padding = False
-            
-            # 마지막 차원 (width) 확인
-            if padded_mel.shape[-1] % 2 != 0:
-                padded_mel = F.pad(padded_mel, (0, 1), mode='constant', value=0)
-                need_padding = True
-            
-            # 끝에서 두 번째 차원 (height) 확인
-            if padded_mel.shape[-2] % 2 != 0:
-                padded_mel = F.pad(padded_mel, (0, 0, 0, 1), mode='constant', value=0)
-                need_padding = True
-            
-            if not need_padding:
-                break
-        
-        # 더 큰 2의 거듭제곱으로 패딩 (DCAE가 여러 레벨의 다운샘플링을 사용할 수 있음)
-        target_size_h = ((padded_mel.shape[-2] + 31) // 32) * 32  # 32의 배수로
-        target_size_w = ((padded_mel.shape[-1] + 31) // 32) * 32  # 32의 배수로
+        # 32의 배수로 패딩 (DCAE가 여러 레벨의 다운샘플링을 사용)
+        target_size_h = ((padded_mel.shape[-2] + 31) // 32) * 32
+        target_size_w = ((padded_mel.shape[-1] + 31) // 32) * 32
         
         if padded_mel.shape[-2] < target_size_h:
             padding_h = target_size_h - padded_mel.shape[-2]
@@ -635,20 +620,25 @@ class PretrainedDCAE(nn.Module):
         
         return padded_mel
     
-    def encode(self, audio: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def encode(self, audio: torch.Tensor, is_first_chunk: bool = True) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         오디오를 잠재 공간으로 인코딩 (차원 호환성 개선)
         
         Args:
             audio: (B, 2, T) 스테레오 오디오
+            is_first_chunk: 첫 번째 청크인지 여부 (패딩 적용 결정)
             
         Returns:
             latents: 잠재 벡터
             quantization_loss: 양자화 손실
         """
         try:
+            # 첫 번째 청크에만 시작 패딩 적용
+            if is_first_chunk:
+                audio = F.pad(audio, (self.start_padding_samples, 0), mode='reflect')
+            
             # 오디오 -> 멜 스펙트로그램
-            mel = self.audio_to_mel(audio)
+            mel = self.audio_to_mel(audio, is_first_chunk)
             
             # DCAE 호환성을 위한 패딩
             mel = self._pad_mel_for_dcae(mel)
@@ -714,13 +704,14 @@ class PretrainedDCAE(nn.Module):
             dummy_latents = torch.randn(batch_size, self.latent_channels, 16, 16, device=audio.device if isinstance(audio, torch.Tensor) else device)
             return dummy_latents, None
     
-    def decode(self, latents: torch.Tensor, target_length: Optional[int] = None) -> torch.Tensor:
+    def decode(self, latents: torch.Tensor, target_length: Optional[int] = None, is_first_chunk: bool = True) -> torch.Tensor:
         """
         잠재 벡터를 오디오로 디코딩 (차원 호환성 개선)
         
         Args:
             latents: 잠재 벡터
             target_length: 목표 오디오 길이 (옵션)
+            is_first_chunk: 첫 번째 청크인지 여부 (패딩 제거 결정)
             
         Returns:
             audio: (B, 2, T) 스테레오 오디오
@@ -746,6 +737,10 @@ class PretrainedDCAE(nn.Module):
                     try:
                         audio = self.vocoder.decode(mel)
                         
+                        # 첫 번째 청크에서만 시작 패딩 제거
+                        if is_first_chunk and audio.shape[-1] > self.start_padding_samples:
+                            audio = audio[..., self.start_padding_samples:]
+                        
                         # 목표 길이에 맞게 조정
                         if target_length is not None and audio.shape[-1] != target_length:
                             if audio.shape[-1] > target_length:
@@ -762,6 +757,10 @@ class PretrainedDCAE(nn.Module):
                 else:
                     # Vocoder가 없는 경우에만 폴백 사용
                     audio = self._mel_to_audio_fallback(mel)
+                
+                # 첫 번째 청크에서만 시작 패딩 제거 (폴백 경로)
+                if is_first_chunk and audio.shape[-1] > self.start_padding_samples:
+                    audio = audio[..., self.start_padding_samples:]
                 
                 # 목표 길이에 맞게 조정
                 if target_length is not None and audio.shape[-1] != target_length:
@@ -792,13 +791,13 @@ class PretrainedDCAE(nn.Module):
             # 멜 스펙트로그램의 디바이스 확인
             device = mel.device
             
-            # Griffin-Lim 변환기 (CPU에서 생성 후 필요시 GPU로 이동)
+            # Griffin-Lim 변환기 (디바이스 호환성 개선)
             griffin_lim = T.GriffinLim(
                 n_fft=2048,
                 hop_length=512,
                 n_iter=32,
                 power=1.0
-            )
+            ).to(device)  # 같은 디바이스로 이동
             
             # 차원 정규화
             if mel.dim() == 4:
@@ -878,12 +877,13 @@ class PretrainedDCAE(nn.Module):
             else:
                 return torch.randn(1, 2, 441000) * 0.1
     
-    def audio_to_mel(self, audio: torch.Tensor) -> torch.Tensor:
+    def audio_to_mel(self, audio: torch.Tensor, is_first_chunk: bool = True) -> torch.Tensor:
         """
         오디오를 멜 스펙트로그램으로 변환 (차원 안전성 확보)
         
         Args:
             audio: 오디오 텐서
+            is_first_chunk: 첫 번째 청크인지 여부 (시작 패딩 적용 결정)
             
         Returns:
             mel: 멜 스펙트로그램
@@ -904,13 +904,24 @@ class PretrainedDCAE(nn.Module):
         else:
             raise ValueError(f"Expected audio tensor with 2-3 dims, got {audio.shape}")
         
+        # 최소 채널 수 보장
+        if channels == 0:
+            channels = 1
+            audio = audio.unsqueeze(1) if audio.dim() == 2 else audio
+        
         # 각 채널에 대해 멜 스펙트로그램 계산
         mel_list = []
         for b in range(batch_size):
             channel_mels = []
             for c in range(channels):
                 try:
-                    audio_sample = audio[b, c]
+                    # 인덱스 안전성 확인
+                    if c >= audio.shape[1]:
+                        # 채널 인덱스가 범위를 벗어난 경우, 마지막 채널 복사
+                        audio_sample = audio[b, -1] if audio.shape[1] > 0 else torch.zeros(2048, device=audio.device)
+                    else:
+                        audio_sample = audio[b, c]
+                    
                     # 오디오 길이가 너무 짧으면 패딩
                     if audio_sample.numel() < 2048:
                         padding_needed = 2048 - audio_sample.numel()
@@ -929,7 +940,7 @@ class PretrainedDCAE(nn.Module):
                     channel_mels.append(mel)
                 except Exception as e:
                     print(f"Warning: Mel transform failed for batch {b}, channel {c}: {e}")
-                    # 더미 멜 생성 (최소 크기 보장)
+                    # 더미 멜 생성 (최소 크기 보장) - 128 mel bins 사용
                     dummy_mel = torch.randn(128, max(128, audio.shape[-1] // 512), device=audio.device)
                     channel_mels.append(dummy_mel)
             

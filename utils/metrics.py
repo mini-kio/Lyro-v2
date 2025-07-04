@@ -139,7 +139,7 @@ class AudioQualityMetrics:
         degraded = degraded[:min_len]
         
         # 스펙트로그램 계산
-        window = torch.hann_window(512)
+        window = torch.hann_window(512, device=reference.device)
         
         ref_stft = torch.stft(reference, n_fft=512, hop_length=128, 
                              window=window, return_complex=True)
@@ -281,7 +281,7 @@ class PerceptualMetrics:
             스펙트럴 컨버전스 메트릭
         """
         # STFT 계산
-        window = torch.hann_window(1024)
+        window = torch.hann_window(1024, device=target.device)
         
         target_stft = torch.stft(target.flatten(), n_fft=1024, hop_length=256,
                                 window=window, return_complex=True)
@@ -321,7 +321,7 @@ class PerceptualMetrics:
             로그 STFT 거리 메트릭
         """
         # STFT 계산
-        window = torch.hann_window(1024)
+        window = torch.hann_window(1024, device=target.device)
         
         target_stft = torch.stft(target.flatten(), n_fft=1024, hop_length=256,
                                 window=window, return_complex=True)
@@ -399,8 +399,9 @@ class MusicMetrics:
                 
         except Exception:
             # fallback: 스펙트럴 유사도
-            stft1 = torch.stft(audio1, n_fft=1024, hop_length=256, return_complex=True)
-            stft2 = torch.stft(audio2, n_fft=1024, hop_length=256, return_complex=True)
+            window = torch.hann_window(1024, device=audio1.device)
+            stft1 = torch.stft(audio1, n_fft=1024, hop_length=256, window=window, return_complex=True)
+            stft2 = torch.stft(audio2, n_fft=1024, hop_length=256, window=window, return_complex=True)
             
             mag1 = torch.abs(stft1)
             mag2 = torch.abs(stft2)
