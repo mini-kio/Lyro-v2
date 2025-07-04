@@ -2,7 +2,7 @@
 LYRO Models Package (수정됨 - 중복 제거 및 통합 DCAE + Vocoder)
 """
 
-from .dcae import PretrainedDCAE, AdvancedVocoder, create_dcae_model
+from .dcae import MusicDCAE, AdvancedVocoder, create_dcae_model
 from .generator import LyroGenerator, GeneratorConfig, create_lyro_generator
 from .ssm_flow import SSMFlowGenerator, create_ssm_flow_generator
 from .encoders import CaptionEncoder, LyricsEncoder, ReferenceEncoder
@@ -17,7 +17,7 @@ from .sampling import FlowMatchingSampler
 
 __all__ = [
     # Pretrained DCAE + Vocoder (통합됨)
-    'PretrainedDCAE',
+    'MusicDCAE',
     'AdvancedVocoder',
     'create_dcae_model',
     

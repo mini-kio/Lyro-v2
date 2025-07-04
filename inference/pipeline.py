@@ -14,7 +14,7 @@ import logging
 import time
 import warnings
 
-from models.dcae import PretrainedDCAE, create_dcae_model
+from models.dcae import MusicDCAE, create_dcae_model
 from models.generator import LyroGenerator, GeneratorConfig, create_lyro_generator
 from models.sampling import FlowMatchingSampler
 from data.processor import DataProcessor, ProcessorConfig
@@ -96,7 +96,7 @@ class LyroPipeline:
     
     def __init__(
         self,
-        dcae_model: PretrainedDCAE,
+        dcae_model: MusicDCAE,
         generator_model: LyroGenerator,
         data_processor: DataProcessor,
         device: Optional[torch.device] = None

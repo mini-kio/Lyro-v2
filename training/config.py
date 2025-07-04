@@ -78,8 +78,8 @@ class GeneratorConfig:
 
 
 @dataclass
-class PretrainedDCAEConfig:
-    """프리트레인된 DCAE + Vocoder 설정 (수정됨)"""
+class MusicDCAEConfig:
+    """MusicDCAE + Vocoder 설정 (수정됨)"""
     
     # 프리트레인된 모델 정보
     model_name: str = "ACE-Step/ACE-Step-v1-3.5B"
@@ -247,7 +247,7 @@ class LyroConfig:
     """LYRO 전체 설정 (수정됨 - 통합 DCAE + Vocoder)"""
     
     generator: GeneratorConfig = field(default_factory=GeneratorConfig)
-    dcae: PretrainedDCAEConfig = field(default_factory=PretrainedDCAEConfig)
+    dcae: MusicDCAEConfig = field(default_factory=MusicDCAEConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     data: DataConfig = field(default_factory=DataConfig)
     encoder: EncoderConfig = field(default_factory=EncoderConfig)
