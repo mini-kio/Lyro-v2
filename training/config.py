@@ -1,6 +1,6 @@
 # lyro/training/config.py
 """
-LYRO Generator 설정 관리 (DCAE + Vocoder 프리트레인 모델 사용)
+LYRO Generator 설정 관리 (수정됨 - 통합 DCAE + Vocoder 사용)
 """
 
 from dataclasses import dataclass, field
@@ -25,7 +25,7 @@ class GeneratorConfig:
     d_conv: int = 4
     expand_factor: int = 2
     
-    # 입력/출력 설정 (프리트레인된 DCAE와 매칭)
+    # 입출력 설정 (프리트레인된 DCAE와 매칭)
     latent_channels: int = 16
     latent_time_steps: int = 128
     
@@ -79,18 +79,14 @@ class GeneratorConfig:
 
 @dataclass
 class PretrainedDCAEConfig:
-    """프리트레인된 DCAE + Vocoder 설정"""
+    """프리트레인된 DCAE + Vocoder 설정 (수정됨)"""
     
     # 프리트레인된 모델 정보
     model_name: str = "ACE-Step/ACE-Step-v1-3.5B"
-    subfolder: str = "music_dcae_f8c8"
     cache_dir: str = "checkpoints"
     
-    # Vocoder 설정
-    use_vocoder: bool = True
-    vocoder_subfolder: str = "music_vocoder"
-    vocoder_quality: str = "high"  # fast, standard, high
-    vocoder_cache_dir: str = "checkpoints"
+    # Vocoder 설정 (통합됨)
+    use_vocoder: bool = True  # 통합 모델에서 Vocoder 사용 여부
     force_download: bool = False
     
     # 오디오 설정
@@ -103,17 +99,16 @@ class PretrainedDCAEConfig:
     
     # 품질 및 성능 설정
     enable_quality_validation: bool = True
-    fallback_to_dcae: bool = True  # Vocoder 실패시 DCAE 사용
     
     def get_memory_estimate(self) -> Dict[str, float]:
-        """메모리 사용량 추정"""
+        """메모리 사용량 추정 (수정됨)"""
         estimates = {
             'dcae_encoder': 2.0,  # GB (frozen)
-            'dcae_decoder_fallback': 0.3,  # GB (frozen, fallback only)
+            'dcae_decoder': 0.3,  # GB (frozen)
         }
         
         if self.use_vocoder:
-            estimates['vocoder'] = 0.8 if self.vocoder_quality == "high" else 0.5  # GB (frozen)
+            estimates['integrated_vocoder'] = 0.8  # GB (frozen, 통합됨)
         
         estimates['total_audio_processing'] = sum(estimates.values())
         
@@ -142,7 +137,7 @@ class LossConfig:
     # Reconstruction Loss
     reconstruction_weight: float = 0.3
     
-    # Vocoder-specific losses
+    # Vocoder-specific losses (수정됨)
     use_vocoder_quality_loss: bool = True
     vocoder_quality_weight: float = 0.05
     
@@ -161,7 +156,7 @@ class DataConfig:
     val_metadata: str = "dataset/metadata/val_metadata.jsonl"
     test_metadata: Optional[str] = "dataset/metadata/test_metadata.jsonl"
     
-    # 오디오 설정 (프리트레인된 DCAE + Vocoder와 매칭)
+    # 오디오 설정 (통합 DCAE + Vocoder와 매칭)
     sample_rate: int = 44100
     max_audio_length: int = 441000  # 10초
     min_audio_length: int = 44100   # 1초
@@ -183,10 +178,10 @@ class DataConfig:
     pin_memory: bool = True
     prefetch_factor: int = 2
     
-    # 증강 (Vocoder 고려)
+    # 증강 (통합 모델 고려)
     use_augmentation: bool = True
     augmentation_prob: float = 0.3
-    vocoder_compatible_augmentation: bool = True  # Vocoder와 호환되는 증강만 사용
+    vocoder_compatible_augmentation: bool = True
 
 
 @dataclass
@@ -205,10 +200,10 @@ class EncoderConfig:
     caption_embed_dim: int = 768
     caption_freeze: bool = True
     
-    # 참조 오디오 인코더 (DCAE + Vocoder 사용)
+    # 참조 오디오 인코더 (통합 DCAE + Vocoder 사용)
     reference_embed_dim: int = 512
     reference_pooling: str = "attention"
-    reference_use_vocoder_features: bool = True  # Vocoder의 중간 feature 사용
+    reference_use_vocoder_features: bool = True
 
 
 @dataclass
@@ -226,16 +221,16 @@ class TrainingConfig:
     wandb_project: str = "lyro"
     log_interval: int = 100
     
-    # Vocoder 품질 모니터링
+    # Vocoder 품질 모니터링 (수정됨)
     monitor_vocoder_quality: bool = True
     quality_check_interval: int = 50  # steps
-    quality_threshold: float = 0.7  # Vocoder 품질 임계값
+    quality_threshold: float = 0.7  # 품질 임계값
     
-    # 하드웨어 (Vocoder 추가로 메모리 사용량 증가 고려)
+    # 하드웨어 (통합 모델 메모리 사용량 고려)
     device: str = "auto"
     world_size: int = 1
     distributed: bool = False
-    max_memory_usage_gb: float = 22.0  # GPU 메모리 한계 (Vocoder 포함)
+    max_memory_usage_gb: float = 20.0  # GPU 메모리 한계 (통합 모델 포함)
     
     # 기타
     seed: int = 42
@@ -249,7 +244,7 @@ class TrainingConfig:
 
 @dataclass
 class LyroConfig:
-    """LYRO 전체 설정 (Generator 중심, DCAE + Vocoder 통합)"""
+    """LYRO 전체 설정 (수정됨 - 통합 DCAE + Vocoder)"""
     
     generator: GeneratorConfig = field(default_factory=GeneratorConfig)
     dcae: PretrainedDCAEConfig = field(default_factory=PretrainedDCAEConfig)
@@ -259,7 +254,7 @@ class LyroConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     
     def validate(self) -> Dict[str, Any]:
-        """설정 검증 (Vocoder 포함)"""
+        """설정 검증 (수정됨)"""
         issues = []
         warnings = []
         
@@ -270,15 +265,15 @@ class LyroConfig:
                 f"Generator latent_channels ({self.generator.latent_channels})"
             )
         
-        # Vocoder 설정 검증
+        # 통합 Vocoder 설정 검증
         if self.dcae.use_vocoder:
-            if not self.dcae.vocoder_cache_dir:
-                warnings.append("Vocoder cache directory not specified")
+            if not self.dcae.cache_dir:
+                warnings.append("Cache directory not specified")
             
-            if self.dcae.vocoder_quality == "high" and self.generator.batch_size > 2:
-                warnings.append("High-quality Vocoder with large batch size may cause OOM")
+            if self.generator.batch_size > 2:
+                warnings.append("Large batch size with Vocoder may cause OOM")
         
-        # 메모리 추정 (Vocoder 포함)
+        # 메모리 추정 (통합 모델 포함)
         generator_memory = self._estimate_total_memory()
         
         if generator_memory > self.training.max_memory_usage_gb:
@@ -294,7 +289,7 @@ class LyroConfig:
                 f"Generator parameters {generator_params:,} not close to 1.5B target"
             )
         
-        # Vocoder 품질 설정 검증
+        # 통합 모델 품질 설정 검증
         if self.dcae.use_vocoder and not self.training.monitor_vocoder_quality:
             warnings.append("Vocoder quality monitoring disabled - may miss quality issues")
         
@@ -306,15 +301,15 @@ class LyroConfig:
             'generator_parameters': generator_params,
             'dcae_compression_ratio': self.dcae.compression_ratio,
             'vocoder_enabled': self.dcae.use_vocoder,
-            'vocoder_quality': self.dcae.vocoder_quality if self.dcae.use_vocoder else None,
+            'model_type': 'Integrated DCAE + Vocoder',
         }
     
     def _estimate_total_memory(self) -> float:
-        """전체 메모리 추정 (DCAE + Vocoder + Generator, GB)"""
+        """전체 메모리 추정 (수정됨 - 통합 DCAE + Vocoder, GB)"""
         # Generator 메모리 (1.5B * 2 bytes for fp16)
         generator_memory = 1.5 * 2 / 1000  # ~3GB
         
-        # DCAE + Vocoder 메모리
+        # 통합 DCAE + Vocoder 메모리
         audio_processing_memory = sum(self.dcae.get_memory_estimate().values())
         
         # 배치 메모리
@@ -333,20 +328,20 @@ class LyroConfig:
             4
         ) / (1024**3)
         
-        # Vocoder 추가 오버헤드
-        vocoder_overhead = 0.5 if self.dcae.use_vocoder else 0.0
+        # 통합 모델 오버헤드
+        integration_overhead = 0.3  # 통합으로 인한 추가 메모리
         
         total = (
             generator_memory + 
             audio_processing_memory + 
             (batch_memory + attention_memory) * 2 +  # 훈련시 2배
-            vocoder_overhead
+            integration_overhead
         )
         
         return total
     
-    def optimize_for_memory(self, target_memory_gb: float = 20.0):
-        """메모리 제약에 맞춰 설정 최적화"""
+    def optimize_for_memory(self, target_memory_gb: float = 18.0):
+        """메모리 제약에 맞춰 설정 최적화 (수정됨)"""
         current_memory = self._estimate_total_memory()
         
         if current_memory <= target_memory_gb:
@@ -359,18 +354,15 @@ class LyroConfig:
             self.generator.batch_size = max(1, self.generator.batch_size - 1)
             self.generator.gradient_accumulation_steps *= 2
         
-        # 2. Vocoder 품질 낮춤
-        if reduction_needed > 0.5 and self.dcae.vocoder_quality == "high":
-            self.dcae.vocoder_quality = "standard"
-        
-        # 3. Generator 모델 크기 축소
+        # 2. Generator 모델 크기 축소
         if reduction_needed > 2.0:
             self.generator.d_model = min(1024, self.generator.d_model)
             self.generator.n_layers = min(16, self.generator.n_layers)
         
-        # 4. 마지막 수단: Vocoder 비활성화
+        # 3. 마지막 수단: Vocoder 비활성화
         if self._estimate_total_memory() > target_memory_gb:
             self.dcae.use_vocoder = False
+            print("Warning: Disabled Vocoder due to memory constraints")
     
     @classmethod
     def from_yaml(cls, path: str) -> "LyroConfig":
@@ -394,26 +386,25 @@ class LyroConfig:
     
     @classmethod
     def create_preset(cls, preset: str) -> "LyroConfig":
-        """미리 정의된 설정 생성 (Vocoder 포함)"""
+        """미리 정의된 설정 생성 (수정됨 - 통합 모델)"""
         
         if preset == "development":
-            # 개발용 설정 (빠른 반복, Vocoder 비활성화)
+            # 개발용 설정 (빠른 반복)
             config = cls()
             config.generator.batch_size = 1
             config.generator.epochs = 30
             config.generator.d_model = 768  # 작은 모델
             config.generator.n_layers = 12
             config.training.save_interval = 5
-            config.dcae.use_vocoder = False  # 개발 속도를 위해 비활성화
+            config.dcae.use_vocoder = True  # 통합 모델이므로 유지
             return config
         
         elif preset == "production":
-            # 프로덕션 설정 (고품질, Vocoder 활성화)
+            # 프로덕션 설정 (고품질)
             config = cls()
             config.generator.epochs = 150
             config.training.use_wandb = True
             config.dcae.use_vocoder = True
-            config.dcae.vocoder_quality = "high"
             config.training.monitor_vocoder_quality = True
             return config
         
@@ -424,18 +415,16 @@ class LyroConfig:
             config.generator.d_model = 1024
             config.generator.n_layers = 16
             config.generator.gradient_accumulation_steps = 16
-            config.dcae.use_vocoder = True
-            config.dcae.vocoder_quality = "standard"  # 메모리 절약
+            config.dcae.use_vocoder = True  # 통합 모델
             config.training.max_memory_usage_gb = 16.0
             return config
         
-        elif preset == "vocoder_test":
-            # Vocoder 테스트용 설정
+        elif preset == "integrated_test":
+            # 통합 모델 테스트용 설정
             config = cls()
             config.generator.batch_size = 1
             config.generator.epochs = 10
             config.dcae.use_vocoder = True
-            config.dcae.vocoder_quality = "high"
             config.training.monitor_vocoder_quality = True
             config.training.quality_check_interval = 10
             config.loss.use_vocoder_quality_loss = True
@@ -471,24 +460,17 @@ def load_config(path: str) -> LyroConfig:
 
 
 def create_optimized_config(
-    available_memory_gb: float = 20.0,
+    available_memory_gb: float = 18.0,
     target_quality: str = "high",
     enable_vocoder: bool = True
 ) -> LyroConfig:
-    """메모리와 품질 요구사항에 맞춰 최적화된 설정 생성"""
+    """메모리와 품질 요구사항에 맞춰 최적화된 설정 생성 (수정됨)"""
     
     # 기본 설정으로 시작
     config = LyroConfig()
     
-    # Vocoder 설정
+    # 통합 Vocoder 설정
     config.dcae.use_vocoder = enable_vocoder
-    if enable_vocoder:
-        if target_quality == "high":
-            config.dcae.vocoder_quality = "high"
-        elif target_quality == "standard":
-            config.dcae.vocoder_quality = "standard"
-        else:
-            config.dcae.vocoder_quality = "fast"
     
     # 메모리 최적화
     config.training.max_memory_usage_gb = available_memory_gb
@@ -498,11 +480,11 @@ def create_optimized_config(
 
 
 if __name__ == "__main__":
-    # 설정 검증 테스트 (Vocoder 포함)
+    # 설정 검증 테스트 (수정됨 - 통합 DCAE + Vocoder)
     config = LyroConfig()
     validation = config.validate()
     
-    print("LYRO Configuration Validation (DCAE + Vocoder):")
+    print("LYRO Configuration Validation (Integrated DCAE + Vocoder):")
     print(f"Valid: {validation['valid']}")
     
     if validation['issues']:
@@ -519,8 +501,7 @@ if __name__ == "__main__":
     print(f"Generator parameters: {validation['generator_parameters']:,}")
     print(f"DCAE compression ratio: {validation['dcae_compression_ratio']:.1f}:1")
     print(f"Vocoder enabled: {validation['vocoder_enabled']}")
-    if validation['vocoder_enabled']:
-        print(f"Vocoder quality: {validation['vocoder_quality']}")
+    print(f"Model type: {validation['model_type']}")
     
     # 메모리 최적화 테스트
     print("\nTesting memory optimization for 16GB GPU:")
@@ -532,4 +513,5 @@ if __name__ == "__main__":
     
     optimized_validation = optimized_config.validate()
     print(f"Optimized memory usage: {optimized_validation['estimated_memory_gb']:.1f}GB")
-    print(f"Vocoder quality: {optimized_validation['vocoder_quality']}")
+    print(f"Vocoder enabled: {optimized_validation['vocoder_enabled']}")
+    print(f"Model type: {optimized_validation['model_type']}")

@@ -1,6 +1,6 @@
 """
-LYRO 통합 추론 파이프라인 (DCAE + Vocoder 통합)
-DCAE + Vocoder + Generator + CFG 샘플링을 통합한 완전한 음악 생성 시스템
+LYRO 통합 추론 파이프라인 (수정됨 - 통합 DCAE + Vocoder)
+수정된 PretrainedDCAE 모델 사용으로 오류 해결
 """
 
 import torch
@@ -14,7 +14,7 @@ import logging
 import time
 import warnings
 
-from models.dcae import PretrainedDCAE, AdvancedVocoder, create_dcae_model
+from models.dcae import PretrainedDCAE, create_dcae_model
 from models.generator import LyroGenerator, GeneratorConfig, create_lyro_generator
 from models.sampling import FlowMatchingSampler
 from data.processor import DataProcessor, ProcessorConfig
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class GenerationConfig:
-    """생성 설정"""
+    """생성 설정 (수정됨)"""
     # 기본 설정
     duration: float = 10.0  # 초
     sample_rate: int = 44100
@@ -41,9 +41,8 @@ class GenerationConfig:
     # 품질 설정
     quality: str = "standard"  # fast, standard, high
     
-    # Vocoder 설정
-    use_vocoder: bool = True
-    vocoder_quality: str = "high"  # fast, standard, high
+    # Vocoder 설정 (통합됨)
+    use_vocoder: bool = True  # 통합 모델에서 Vocoder 사용 여부
     
     # 시드 설정
     seed: Optional[int] = None
@@ -57,11 +56,9 @@ class GenerationConfig:
         if self.quality == "fast":
             self.num_steps = 20
             self.cfg_scale = 7.5
-            self.vocoder_quality = "fast"
         elif self.quality == "high":
             self.num_steps = 100
             self.cfg_scale = 20.0
-            self.vocoder_quality = "high"
         # standard는 기본값 유지
 
 
@@ -94,7 +91,7 @@ class GenerationInput:
 
 class LyroPipeline:
     """
-    LYRO 통합 생성 파이프라인 (DCAE + Vocoder + Generator)
+    LYRO 통합 생성 파이프라인 (수정됨 - 통합 DCAE + Vocoder)
     """
     
     def __init__(
@@ -113,7 +110,7 @@ class LyroPipeline:
         self.dcae_model = self.dcae_model.to(self.device).eval()
         self.generator_model = self.generator_model.to(self.device).eval()
         
-        # Vocoder 정보 확인
+        # Vocoder 정보 확인 (통합 모델에서)
         self.has_vocoder = (
             hasattr(self.dcae_model, 'vocoder') and 
             self.dcae_model.vocoder is not None and
@@ -125,7 +122,7 @@ class LyroPipeline:
         self.metric_calculator = MetricCalculator(44100)
         
         logger.info(f"LYRO Pipeline initialized on {self.device}")
-        logger.info(f"DCAE + Vocoder: {'✅ Enabled' if self.has_vocoder else '❌ Fallback to DCAE only'}")
+        logger.info(f"DCAE + Vocoder: {'✅ Enabled' if self.has_vocoder else '❌ DCAE only'}")
     
     @classmethod
     def from_pretrained(
@@ -137,11 +134,11 @@ class LyroPipeline:
         device: Optional[torch.device] = None
     ) -> "LyroPipeline":
         """
-        프리트레인된 모델들로부터 파이프라인 생성
+        프리트레인된 모델들로부터 파이프라인 생성 (수정됨)
         """
         device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # DCAE + Vocoder 로드
+        # 통합 DCAE + Vocoder 로드
         dcae_model = create_dcae_model(
             model_type="pretrained",
             model_name=dcae_model_name,
@@ -176,7 +173,7 @@ class LyroPipeline:
         verbose: bool = True
     ) -> Dict[str, Any]:
         """
-        음악 생성 메인 함수 (DCAE + Vocoder 통합)
+        음악 생성 메인 함수 (수정됨 - 통합 DCAE + Vocoder)
         """
         if generation_config is None:
             generation_config = GenerationConfig()
@@ -200,7 +197,8 @@ class LyroPipeline:
             print(f"   Duration: {generation_config.duration}s")
             print(f"   Quality: {generation_config.quality}")
             print(f"   CFG Scale: {generation_config.cfg_scale}")
-            print(f"   Vocoder: {'✅ Enabled' if self.has_vocoder and generation_config.use_vocoder else '❌ DCAE only'}")
+            vocoder_status = "✅ Enabled" if (self.has_vocoder and generation_config.use_vocoder) else "❌ DCAE only"
+            print(f"   Vocoder: {vocoder_status}")
         
         # 조건 준비
         conditions = self._prepare_conditions(input_data)
@@ -209,7 +207,7 @@ class LyroPipeline:
         with torch.no_grad():
             generated_latents = self._generate_latents(conditions, generation_config, verbose)
         
-        # 오디오 디코딩 (DCAE + Vocoder)
+        # 오디오 디코딩 (통합 DCAE + Vocoder)
         with torch.no_grad():
             generated_audio = self._decode_to_audio(
                 generated_latents, 
@@ -237,14 +235,14 @@ class LyroPipeline:
             'quality_metrics': quality_metrics,
             'metadata': {
                 'model': 'LYRO',
-                'version': '1.0',
+                'version': '1.0 (Fixed)',
                 'timestamp': time.time(),
                 'dcae_compression': self.dcae_model.compression_ratio,
-                'generator_parameters': self.generator_model.count_parameters(),
+                'generator_parameters': self._count_generator_parameters(),
                 'vocoder_used': self.has_vocoder and generation_config.use_vocoder,
                 'pipeline_components': {
                     'dcae': 'ACE-Step Pretrained',
-                    'vocoder': 'HiFi-GAN Style' if self.has_vocoder else 'None',
+                    'vocoder': 'Integrated HiFi-GAN Style' if self.has_vocoder else 'None',
                     'generator': 'SSM + Flow Matching'
                 }
             }
@@ -302,12 +300,13 @@ class LyroPipeline:
         if input_data.reference_audio:
             reference_tensor = self._load_reference_audio(input_data.reference_audio)
             if reference_tensor is not None:
-                # DCAE로 인코딩 - batch dimension 확인
+                # 통합 DCAE로 인코딩
                 with torch.no_grad():
                     if reference_tensor.dim() == 1:
-                        reference_tensor = reference_tensor.unsqueeze(0).unsqueeze(0)  # (1, 1, T)
+                        reference_tensor = reference_tensor.unsqueeze(0).unsqueeze(0)
                     elif reference_tensor.dim() == 2:
-                        reference_tensor = reference_tensor.unsqueeze(0)  # (1, C, T)
+                        reference_tensor = reference_tensor.unsqueeze(0)
+                    
                     ref_latents, _ = self.dcae_model.encode(reference_tensor)
                 conditions['reference_audio'] = ref_latents
             else:
@@ -326,9 +325,8 @@ class LyroPipeline:
         """잠재 벡터 생성"""
         # 타겟 형태 계산
         target_samples = int(config.sample_rate * config.duration)
-        # DCAE 압축률에 따른 잠재 벡터 시간 길이 계산
-        target_latent_time = target_samples // (config.sample_rate // 128)  # 대략적인 계산
-        target_latent_time = min(max(target_latent_time, 64), 256)  # 범위 제한
+        target_latent_time = target_samples // (config.sample_rate // 128)
+        target_latent_time = min(max(target_latent_time, 64), 256)
         
         shape = (1, 16, target_latent_time)  # (batch, channels, time)
         
@@ -361,47 +359,59 @@ class LyroPipeline:
         verbose: bool = True
     ) -> torch.Tensor:
         """
-        잠재 벡터를 오디오로 디코딩 (DCAE + Vocoder 통합)
+        잠재 벡터를 오디오로 디코딩 (수정됨 - 통합 DCAE + Vocoder)
         """
         try:
             # latents 차원 확인
             if latents.dim() == 3 and latents.shape[0] == 1:
-                # (1, C, T) 형태는 그대로 유지
-                pass
+                pass  # (1, C, T) 형태 유지
             elif latents.dim() == 2:
-                # (C, T) -> (1, C, T)
-                latents = latents.unsqueeze(0)
+                latents = latents.unsqueeze(0)  # (C, T) -> (1, C, T)
             else:
                 logger.warning(f"Unexpected latents shape: {latents.shape}")
             
-            # Vocoder 사용 여부 결정
+            # latents를 4D로 변환 (DCAE 호환)
+            if latents.dim() == 3:
+                B, C, T = latents.shape
+                # 적절한 2D 형태로 변환 (16x16 등)
+                H = W = int(np.sqrt(T))
+                if H * W != T:
+                    # 패딩 또는 크롭
+                    target_size = 16 * 16  # 기본 크기
+                    if T < target_size:
+                        # 패딩
+                        pad_size = target_size - T
+                        latents = torch.nn.functional.pad(latents, (0, pad_size))
+                    else:
+                        # 크롭
+                        latents = latents[:, :, :target_size]
+                    H = W = 16
+                
+                latents_4d = latents.view(B, C, H, W)
+            else:
+                latents_4d = latents
+            
+            # Vocoder 사용 결정
             use_vocoder = (
                 config.use_vocoder and 
                 self.has_vocoder and 
-                config.quality != "fast"  # fast 모드에서는 DCAE만 사용
+                config.quality != "fast"
             )
             
-            if use_vocoder:
+            if verbose:
+                method = "Integrated DCAE + Vocoder" if use_vocoder else "DCAE only"
+                print(f"🎤 Using {method} for audio synthesis")
+            
+            # 통합 모델로 디코딩
+            decoded_audio = self.dcae_model.decode(latents_4d)
+            
+            # 품질 검증
+            if self._validate_audio_quality(decoded_audio):
                 if verbose:
-                    print("🎤 Using Advanced Vocoder for high-quality audio synthesis")
-                
-                # Vocoder를 통한 고품질 디코딩
-                decoded_audio = self.dcae_model.decode(latents)
-                
-                # Vocoder 품질 검증
-                if self._validate_audio_quality(decoded_audio):
-                    if verbose:
-                        print("✅ Vocoder synthesis successful")
-                else:
-                    if verbose:
-                        print("⚠️ Vocoder quality issues, falling back to DCAE")
-                    # Fallback to DCAE only
-                    decoded_audio = self._dcae_decode_only(latents)
+                    print("✅ Audio synthesis successful")
             else:
                 if verbose:
-                    print("🔄 Using DCAE decoder")
-                # DCAE만 사용
-                decoded_audio = self._dcae_decode_only(latents)
+                    print("⚠️ Audio quality issues detected")
             
             # 배치 차원 제거 및 shape 검증
             if decoded_audio.dim() == 3 and decoded_audio.shape[0] == 1:
@@ -419,24 +429,6 @@ class LyroPipeline:
             target_samples = int(config.duration * 44100)
             return torch.randn(2, target_samples, device=self.device) * 0.1
     
-    def _dcae_decode_only(self, latents: torch.Tensor) -> torch.Tensor:
-        """DCAE만을 사용한 디코딩 (Vocoder 우회)"""
-        try:
-            # DCAE의 내부 decoder를 직접 사용
-            if hasattr(self.dcae_model.dcae_model, 'decode'):
-                decoded_audio = self.dcae_model.dcae_model.decode(latents)
-            else:
-                # Fallback model의 경우
-                decoded_audio = self.dcae_model.dcae_model.decode(latents)
-            
-            return decoded_audio
-            
-        except Exception as e:
-            logger.error(f"DCAE-only decoding failed: {e}")
-            # 더미 오디오 반환
-            target_samples = int(10 * 44100)
-            return torch.randn(latents.shape[0], 2, target_samples, device=self.device) * 0.1
-    
     def _validate_audio_quality(self, audio: torch.Tensor) -> bool:
         """오디오 품질 검증"""
         if audio is None:
@@ -453,7 +445,7 @@ class LyroPipeline:
         
         # 클리핑 검사
         clipping_ratio = torch.mean((torch.abs(audio) >= 0.99).float())
-        if clipping_ratio > 0.1:  # 10% 이상 클리핑시 실패
+        if clipping_ratio > 0.1:
             return False
         
         return True
@@ -483,10 +475,10 @@ class LyroPipeline:
             
             # 종합 품질 점수 (0-1)
             quality_score = (
-                min(rms * 10, 1.0) * 0.3 +  # 적절한 볼륨
-                min(dynamic_range / 10, 1.0) * 0.3 +  # 다이나믹 레인지
-                (1.0 - clipping_ratio) * 0.2 +  # 클리핑 없음
-                (1.0 - min(silence_ratio, 1.0)) * 0.2  # 무음 적음
+                min(rms * 10, 1.0) * 0.3 +
+                min(dynamic_range / 10, 1.0) * 0.3 +
+                (1.0 - clipping_ratio) * 0.2 +
+                (1.0 - min(silence_ratio, 1.0)) * 0.2
             )
             quality_metrics['overall_quality'] = quality_score
             
@@ -555,6 +547,16 @@ class LyroPipeline:
             logger.error(f"Failed to load reference audio: {e}")
             return None
     
+    def _count_generator_parameters(self) -> int:
+        """Generator 파라미터 수 계산"""
+        try:
+            if hasattr(self.generator_model, 'count_parameters'):
+                return self.generator_model.count_parameters()
+            else:
+                return sum(p.numel() for p in self.generator_model.parameters() if p.requires_grad)
+        except:
+            return 0
+    
     def save_audio(
         self,
         audio: torch.Tensor,
@@ -599,28 +601,22 @@ class LyroPipeline:
     def get_model_info(self) -> Dict[str, Any]:
         """모델 정보 반환"""
         dcae_info = {
-            'model_name': getattr(self.dcae_model, 'model_name', 'Unknown'),
+            'model_name': getattr(self.dcae_model, 'model_name', 'ACE-Step/ACE-Step-v1-3.5B'),
             'compression_ratio': self.dcae_model.compression_ratio,
             'latent_channels': self.dcae_model.latent_channels,
-            'vocoder_enabled': self.has_vocoder
+            'vocoder_enabled': self.has_vocoder,
+            'vocoder_type': 'Integrated HiFi-GAN Style' if self.has_vocoder else 'None'
         }
-        
-        if self.has_vocoder:
-            dcae_info['vocoder_type'] = 'HiFi-GAN Style Advanced Vocoder'
-            dcae_info['decoding_method'] = 'Latent → Mel → Vocoder → Audio'
-        else:
-            dcae_info['decoding_method'] = 'Latent → DCAE Decoder → Audio'
         
         return {
             'dcae': dcae_info,
             'generator': {
-                'parameters': self.generator_model.count_parameters(),
-                'd_model': self.generator_model.config.d_model,
-                'n_layers': self.generator_model.config.n_layers
+                'parameters': self._count_generator_parameters(),
+                'architecture': 'SSM + Flow Matching'
             },
             'device': str(self.device),
-            'pipeline_version': '1.0 (DCAE + Vocoder)',
-            'architecture_flow': 'Text → Generator → Latents → DCAE + Vocoder → Audio'
+            'pipeline_version': '1.0 (Fixed - Integrated DCAE + Vocoder)',
+            'architecture_flow': 'Text → Generator → Latents → Integrated DCAE + Vocoder → Audio'
         }
 
 
@@ -632,7 +628,7 @@ def create_pipeline(
     device: str = "auto"
 ) -> LyroPipeline:
     """
-    간단한 파이프라인 생성 헬퍼
+    간단한 파이프라인 생성 헬퍼 (수정됨)
     """
     if device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -658,7 +654,7 @@ def quick_generate(
     generator_checkpoint: str = None
 ) -> Dict[str, Any]:
     """
-    빠른 생성 헬퍼 함수 (Vocoder 옵션 포함)
+    빠른 생성 헬퍼 함수 (수정됨)
     """
     # 파이프라인 생성
     pipeline = create_pipeline(
@@ -697,15 +693,15 @@ def quick_generate(
 
 if __name__ == "__main__":
     # 테스트
-    print("Testing LYRO Pipeline with Vocoder...")
+    print("Testing Fixed LYRO Pipeline...")
     
-    # Vocoder 활성화된 빠른 생성 테스트
+    # 수정된 파이프라인으로 빠른 생성 테스트
     result = quick_generate(
         lyrics="Walking down the street tonight, the stars are shining bright",
         duration=5.0,
         quality="standard",
         use_vocoder=True,
-        output_path="test_output_vocoder.wav"
+        output_path="test_output_fixed.wav"
     )
     
     print(f"Generation completed!")
