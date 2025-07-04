@@ -1,14 +1,13 @@
 # lyro/data/dataset.py
 """
-LYRO Dataset - Task-based unified structure
-Supports task-specific metadata with validation
+LYRO Dataset - Latent Vector 기반 구조 (수정됨)
+Supports task-specific metadata with latent vectors
 """
 
 import os
 import json
 import random
 import torch
-import torchaudio
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -18,8 +17,8 @@ from tqdm import tqdm
 
 class LyroDataset(Dataset):
     """
-    Unified LYRO dataset with task-based structure
-    Supports SONG, INST, and COVER tasks with proper validation
+    Unified LYRO dataset with latent-based structure (수정됨)
+    Supports SONG, INST, and COVER tasks with latent vectors
     """
     
     def __init__(
@@ -27,29 +26,31 @@ class LyroDataset(Dataset):
         metadata_path: str,
         dataset_root: str,
         tokenizer: Any,
-        max_audio_length: int = 441000,  # 10 seconds at 44.1kHz
+        latent_channels: int = 16,
+        latent_time_steps: int = 128,
         max_text_length: int = 512,
         task_ratios: Dict[str, float] = None,
         augmentation: bool = True,
-        cache_audio: bool = False,
+        cache_latents: bool = False,
         preload_count: int = 0,
         filter_corrupted: bool = True
     ):
         self.metadata_path = Path(metadata_path)
         self.dataset_root = Path(dataset_root)
         self.tokenizer = tokenizer
-        self.max_audio_length = max_audio_length
+        self.latent_channels = latent_channels
+        self.latent_time_steps = latent_time_steps
         self.max_text_length = max_text_length
         self.augmentation = augmentation
-        self.cache_audio = cache_audio
+        self.cache_latents = cache_latents
         self.filter_corrupted = filter_corrupted
         
         # Default task ratios
         if task_ratios is None:
             task_ratios = {
-                'SONG': 0.6,     # Lyrics + audio (no reference)
-                'INST': 0.3,     # Caption + audio (optional reference)
-                'COVER': 0.1     # Reference + lyrics/caption + audio
+                'SONG': 0.6,     # Lyrics + latents (no reference)
+                'INST': 0.3,     # Caption + latents (optional reference)
+                'COVER': 0.1     # Reference + lyrics/caption + latents
             }
         self.task_ratios = task_ratios
         
@@ -59,8 +60,8 @@ class LyroDataset(Dataset):
         # Prepare samples with task validation
         self.samples = self._prepare_samples()
         
-        # Audio cache
-        self.audio_cache = {} if cache_audio else None
+        # Latent cache
+        self.latent_cache = {} if cache_latents else None
         
         # Preload some samples
         if preload_count > 0:
@@ -96,15 +97,15 @@ class LyroDataset(Dataset):
     
     def _validate_metadata_item(self, item: Dict, line_num: int) -> bool:
         """
-        Validate metadata item according to task-specific rules
+        Validate metadata item according to task-specific rules (수정됨 - Latent 기반)
         
         Task validation rules:
         - SONG: must have lyrics, no reference_path
         - INST: no lyrics, optional reference_path
         - COVER: must have reference_path, lyrics optional (for instrumental covers)
         """
-        # Basic required fields
-        if 'id' not in item or 'audio_path' not in item or 'task' not in item:
+        # Basic required fields (latent_path로 변경)
+        if 'id' not in item or 'latent_path' not in item or 'task' not in item:
             if self.filter_corrupted:
                 print(f"Warning: Missing required fields at line {line_num}")
                 return False
@@ -122,7 +123,7 @@ class LyroDataset(Dataset):
         
         # Task-specific validation
         has_lyrics = bool(item.get('lyrics', '').strip())
-        has_reference = bool(item.get('reference_path', '').strip())
+        has_reference = bool(item.get('reference_latent_path', '').strip())
         
         if task == 'SONG':
             # SONG: must have lyrics, no reference
@@ -132,9 +133,9 @@ class LyroDataset(Dataset):
                     return False
             if has_reference:
                 if self.filter_corrupted:
-                    print(f"Warning: SONG task should not have reference_path at line {line_num}")
-                # Remove reference_path for SONG task
-                item.pop('reference_path', None)
+                    print(f"Warning: SONG task should not have reference_latent_path at line {line_num}")
+                # Remove reference for SONG task
+                item.pop('reference_latent_path', None)
         
         elif task == 'INST':
             # INST: no lyrics, optional reference
@@ -148,22 +149,22 @@ class LyroDataset(Dataset):
             # COVER: must have reference, lyrics optional
             if not has_reference:
                 if self.filter_corrupted:
-                    print(f"Warning: COVER task missing reference_path at line {line_num}")
+                    print(f"Warning: COVER task missing reference_latent_path at line {line_num}")
                     return False
         
-        # Validate file existence
-        audio_path = self.dataset_root / item['audio_path']
-        if not audio_path.exists():
+        # Validate file existence (latent files)
+        latent_path = self.dataset_root / item['latent_path']
+        if not latent_path.exists():
             if self.filter_corrupted:
-                print(f"Warning: Audio file not found: {audio_path}")
+                print(f"Warning: Latent file not found: {latent_path}")
                 return False
         
-        # Validate reference audio existence for COVER tasks
+        # Validate reference latent existence for COVER tasks
         if task == 'COVER' and has_reference:
-            ref_path = self.dataset_root / item['reference_path']
+            ref_path = self.dataset_root / item['reference_latent_path']
             if not ref_path.exists():
                 if self.filter_corrupted:
-                    print(f"Warning: Reference file not found: {ref_path}")
+                    print(f"Warning: Reference latent file not found: {ref_path}")
                     return False
         
         # Ensure caption field exists (empty string if not provided)
@@ -188,11 +189,11 @@ class LyroDataset(Dataset):
             sample = {
                 'id': item['id'],
                 'task': task,
-                'audio_path': item['audio_path'],
+                'latent_path': item['latent_path'],
                 'lyrics': item.get('lyrics', ''),
                 'caption': item.get('caption', ''),
                 'genre': item.get('genre', ['unknown']),
-                'reference_path': item.get('reference_path'),
+                'reference_latent_path': item.get('reference_latent_path'),
                 'metadata': item
             }
             
@@ -240,104 +241,115 @@ class LyroDataset(Dataset):
     
     def _preload_samples(self, count: int):
         """Preload some samples for faster access"""
-        print(f"Preloading {count} samples...")
+        print(f"Preloading {count} latent samples...")
         
         for i in tqdm(range(count), desc="Preloading"):
             try:
                 sample = self.samples[i]
-                audio_path = self.dataset_root / sample['audio_path']
+                latent_path = self.dataset_root / sample['latent_path']
                 
-                if audio_path.exists():
-                    audio, sr = torchaudio.load(audio_path)
-                    if self.audio_cache is not None:
-                        self.audio_cache[sample['id']] = (audio, sr)
+                if latent_path.exists():
+                    latents = self._load_latents(latent_path, sample['id'])
+                    if self.latent_cache is not None:
+                        self.latent_cache[sample['id']] = latents
                         
             except Exception as e:
                 print(f"Warning: Failed to preload sample {i}: {e}")
                 continue
                 
-    def _load_audio(self, audio_path: str, sample_id: str) -> Tuple[torch.Tensor, int]:
-        """Load audio with caching support"""
+    def _load_latents(self, latent_path: str, sample_id: str) -> torch.Tensor:
+        """Load latent vectors with caching support"""
         # Check cache first
-        if self.audio_cache is not None and sample_id in self.audio_cache:
-            return self.audio_cache[sample_id]
+        if self.latent_cache is not None and sample_id in self.latent_cache:
+            return self.latent_cache[sample_id]
             
         # Load from disk
-        full_path = self.dataset_root / audio_path
+        full_path = self.dataset_root / latent_path
         
         try:
-            audio, sr = torchaudio.load(full_path)
+            # Load latent vectors (.npy or .pt files)
+            if full_path.suffix == '.npy':
+                latents_np = np.load(full_path)
+                latents = torch.from_numpy(latents_np).float()
+            elif full_path.suffix == '.pt':
+                latents = torch.load(full_path)
+            else:
+                raise ValueError(f"Unsupported latent file format: {full_path.suffix}")
             
             # Cache if enabled
-            if self.audio_cache is not None:
-                self.audio_cache[sample_id] = (audio, sr)
+            if self.latent_cache is not None:
+                self.latent_cache[sample_id] = latents
                 
-            return audio, sr
+            return latents
             
         except Exception as e:
-            print(f"Warning: Failed to load audio {full_path}: {e}")
-            # Return dummy audio
-            sr = 44100
-            audio = torch.randn(2, sr)  # 1 second of noise
-            return audio, sr
+            print(f"Warning: Failed to load latents {full_path}: {e}")
+            # Return dummy latents
+            return torch.randn(self.latent_channels, self.latent_time_steps)
     
-    def _process_audio(self, audio: torch.Tensor, sr: int) -> torch.Tensor:
-        """Process audio to standard format"""
+    def _process_latents(self, latents: torch.Tensor) -> torch.Tensor:
+        """Process latent vectors to standard format"""
         # 차원 정규화
-        if audio.dim() == 1:
-            audio = audio.unsqueeze(0)  # (T,) -> (1, T)
-        elif audio.dim() != 2:
-            raise ValueError(f"Expected 1D or 2D audio tensor, got {audio.shape}")
+        if latents.dim() == 2:
+            latents = latents.unsqueeze(0)  # (C, T) -> (1, C, T)
+        elif latents.dim() == 1:
+            latents = latents.unsqueeze(0).unsqueeze(0)  # (T,) -> (1, 1, T)
+        elif latents.dim() != 3:
+            raise ValueError(f"Expected 2D or 3D latent tensor, got {latents.shape}")
         
-        # Resample if needed
-        if sr != 44100:
-            resampler = torchaudio.transforms.Resample(sr, 44100)
-            audio = resampler(audio)
-            
-        # Ensure stereo
-        if audio.shape[0] == 1:
-            audio = audio.repeat(2, 1)
-        elif audio.shape[0] > 2:
-            audio = audio[:2]
-            
-        # Normalize length
-        current_length = audio.shape[-1]
-        if current_length > self.max_audio_length:
-            # Random crop or center crop
-            if self.augmentation:
-                start_idx = random.randint(0, current_length - self.max_audio_length)
+        # 채널 수 맞춤
+        if latents.shape[1] != self.latent_channels:
+            if latents.shape[1] < self.latent_channels:
+                # 패딩
+                pad_channels = self.latent_channels - latents.shape[1]
+                latents = torch.nn.functional.pad(latents, (0, 0, 0, pad_channels))
             else:
-                start_idx = (current_length - self.max_audio_length) // 2
-            audio = audio[:, start_idx:start_idx + self.max_audio_length]
-        elif current_length < self.max_audio_length:
-            # Pad with zeros
-            pad_length = self.max_audio_length - current_length
-            audio = torch.nn.functional.pad(audio, (0, pad_length))
+                # 크롭
+                latents = latents[:, :self.latent_channels, :]
+        
+        # 시간 길이 맞춤
+        if latents.shape[2] != self.latent_time_steps:
+            if latents.shape[2] > self.latent_time_steps:
+                # Random crop or center crop
+                if self.augmentation:
+                    start_idx = random.randint(0, latents.shape[2] - self.latent_time_steps)
+                else:
+                    start_idx = (latents.shape[2] - self.latent_time_steps) // 2
+                latents = latents[:, :, start_idx:start_idx + self.latent_time_steps]
+            else:
+                # Pad with zeros
+                pad_length = self.latent_time_steps - latents.shape[2]
+                latents = torch.nn.functional.pad(latents, (0, pad_length))
+            
+        # Remove batch dimension if present
+        if latents.shape[0] == 1:
+            latents = latents.squeeze(0)  # (1, C, T) -> (C, T)
             
         # Augmentation
         if self.augmentation:
-            audio = self._augment_audio(audio)
+            latents = self._augment_latents(latents)
             
-        return audio
+        return latents
     
-    def _augment_audio(self, audio: torch.Tensor) -> torch.Tensor:
-        """Apply audio augmentations"""
-        # Random gain
+    def _augment_latents(self, latents: torch.Tensor) -> torch.Tensor:
+        """Apply latent augmentations"""
+        # Random scaling
         if random.random() < 0.3:
-            gain_db = random.uniform(-3, 3)
-            gain_linear = 10 ** (gain_db / 20)
-            audio = audio * gain_linear
+            scale_factor = random.uniform(0.8, 1.2)
+            latents = latents * scale_factor
             
         # Random noise
-        if random.random() < 0.1:
-            noise_level = random.uniform(0.001, 0.01)
-            noise = torch.randn_like(audio) * noise_level
-            audio = audio + noise
+        if random.random() < 0.2:
+            noise_level = random.uniform(0.01, 0.05)
+            noise = torch.randn_like(latents) * noise_level
+            latents = latents + noise
             
-        # Clip to reasonable range
-        audio = torch.clamp(audio, -1.0, 1.0)
+        # Random channel shuffle (가끔)
+        if random.random() < 0.1:
+            channel_order = torch.randperm(latents.shape[0])
+            latents = latents[channel_order]
         
-        return audio
+        return latents
     
     def _process_text(self, text: str, text_type: str = 'lyrics') -> Dict[str, torch.Tensor]:
         """Process text (lyrics or captions) with tokenizer"""
@@ -379,16 +391,16 @@ class LyroDataset(Dataset):
         return len(self.samples)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        """Get a single sample with task-specific processing"""
+        """Get a single sample with task-specific processing (수정됨 - Latent 기반)"""
         if idx >= len(self.samples):
             idx = idx % len(self.samples)
             
         sample = self.samples[idx]
         
         try:
-            # Load and process main audio
-            audio, sr = self._load_audio(sample['audio_path'], sample['id'])
-            audio = self._process_audio(audio, sr)
+            # Load and process main latents
+            latents = self._load_latents(sample['latent_path'], sample['id'])
+            latents = self._process_latents(latents)
             
             # Process lyrics (only for SONG and some COVER tasks)
             task = sample['task']
@@ -401,20 +413,20 @@ class LyroDataset(Dataset):
             # Process caption (all tasks have captions)
             caption_data = self._process_text(sample['caption'], 'caption')
             
-            # Load reference audio (for COVER and optionally INST tasks)
-            reference_audio = None
-            if sample.get('reference_path'):
+            # Load reference latents (for COVER and optionally INST tasks)
+            reference_latents = None
+            if sample.get('reference_latent_path'):
                 try:
-                    ref_audio, ref_sr = self._load_audio(sample['reference_path'], f"{sample['id']}_ref")
-                    reference_audio = self._process_audio(ref_audio, ref_sr)
+                    ref_latents = self._load_latents(sample['reference_latent_path'], f"{sample['id']}_ref")
+                    reference_latents = self._process_latents(ref_latents)
                 except Exception as e:
-                    print(f"Warning: Failed to load reference audio: {e}")
-                    reference_audio = None
+                    print(f"Warning: Failed to load reference latents: {e}")
+                    reference_latents = None
             
             return {
-                # Audio data
-                'audio': audio,
-                'reference_audio': reference_audio,
+                # Latent data
+                'latents': latents,
+                'reference_latents': reference_latents,
                 
                 # Text data
                 'lyrics_tokens': lyrics_data['tokens'],
@@ -442,13 +454,13 @@ class LyroDataset(Dataset):
             print(f"Warning: Error loading sample {idx} ({sample['id']}): {e}")
             
             # Return dummy sample
-            dummy_audio = torch.randn(2, self.max_audio_length)
+            dummy_latents = torch.randn(self.latent_channels, self.latent_time_steps)
             dummy_tokens = torch.zeros(self.max_text_length, dtype=torch.long)
             dummy_mask = torch.zeros(self.max_text_length, dtype=torch.bool)
             
             return {
-                'audio': dummy_audio,
-                'reference_audio': None,
+                'latents': dummy_latents,
+                'reference_latents': None,
                 'lyrics_tokens': dummy_tokens,
                 'lyrics_attention_mask': dummy_mask,
                 'lyrics_length': 0,
@@ -473,7 +485,7 @@ def create_lyro_datasets(
     **kwargs
 ) -> Tuple[LyroDataset, LyroDataset, Optional[LyroDataset]]:
     """
-    Create train, validation, and test datasets with task validation
+    Create train, validation, and test datasets with latent validation (수정됨)
     
     Args:
         train_metadata: Path to training metadata
@@ -516,7 +528,7 @@ def create_lyro_datasets(
             **kwargs
         )
     
-    print(f"Created datasets:")
+    print(f"Created latent-based datasets:")
     print(f"  Train: {len(train_dataset)} samples")
     print(f"  Val: {len(val_dataset)} samples")
     if test_dataset:

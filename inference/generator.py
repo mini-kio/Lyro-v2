@@ -1,7 +1,7 @@
 # lyro/inference/generator.py
 """
-LYRO 생성기 클래스들
-다양한 생성 시나리오를 위한 생성기들
+LYRO 생성기 클래스들 (수정됨 - Generator 전용)
+Latent Vector 생성을 위한 다양한 생성 시나리오
 """
 
 import torch
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class LyroGenerator:
     """
-    LYRO 메인 생성기
+    LYRO 메인 생성기 (수정됨 - Latent 출력)
     단일 생성부터 배치 생성까지 지원
     """
     
@@ -36,7 +36,7 @@ class LyroGenerator:
         seed: Optional[int] = None
     ) -> Dict[str, Any]:
         """
-        가사 기반 노래 생성
+        가사 기반 노래 latent 생성
         
         Args:
             lyrics: 가사 텍스트
@@ -46,7 +46,7 @@ class LyroGenerator:
             seed: 랜덤 시드
             
         Returns:
-            생성 결과
+            생성 결과 (latent vectors)
         """
         input_data = GenerationInput(
             task="SONG",
@@ -81,7 +81,7 @@ class LyroGenerator:
         seed: Optional[int] = None
     ) -> Dict[str, Any]:
         """
-        캡션 기반 인스트루멘탈 생성
+        캡션 기반 인스트루멘탈 latent 생성
         
         Args:
             caption: MusicCaps 스타일 캡션
@@ -90,7 +90,7 @@ class LyroGenerator:
             seed: 랜덤 시드
             
         Returns:
-            생성 결과
+            생성 결과 (latent vectors)
         """
         input_data = GenerationInput(
             task="INST",
@@ -119,30 +119,30 @@ class LyroGenerator:
     def generate_cover(
         self,
         lyrics: str,
-        reference_audio: Union[str, Path, torch.Tensor],
+        reference_latents: Union[torch.Tensor, np.ndarray],
         caption: Optional[str] = None,
         duration: float = 10.0,
         quality: str = "standard",
         seed: Optional[int] = None
     ) -> Dict[str, Any]:
         """
-        참조 오디오 기반 커버 생성
+        참조 latent 기반 커버 생성
         
         Args:
             lyrics: 가사 텍스트
-            reference_audio: 참조 오디오 (파일 경로 또는 텐서)
+            reference_latents: 참조 latent vectors
             caption: 추가 캡션
             duration: 생성 시간 (초)
             quality: 품질 설정
             seed: 랜덤 시드
             
         Returns:
-            생성 결과
+            생성 결과 (latent vectors)
         """
         input_data = GenerationInput(
             task="COVER",
             lyrics=lyrics,
-            reference_audio=reference_audio,
+            reference_latents=reference_latents,
             caption=caption
         )
         
@@ -176,7 +176,7 @@ class LyroGenerator:
 
 class SampleGenerator:
     """
-    샘플링 기반 생성기
+    샘플링 기반 생성기 (수정됨 - Latent 출력)
     다양한 샘플링 전략 지원
     """
     
@@ -202,13 +202,12 @@ class SampleGenerator:
             **kwargs: 추가 생성 설정
             
         Returns:
-            생성 결과
+            생성 결과 (latent vectors)
         """
         config = GenerationConfig(**kwargs)
         
         # 온도 설정을 Flow Matching에 적용
-        # 실제 구현에서는 모델의 샘플링 파라미터로 전달
-        config.guidance_scale = config.guidance_scale / temperature
+        config.cfg_scale = config.cfg_scale / temperature
         
         return self.pipeline.generate(input_data, config)
     
@@ -227,7 +226,7 @@ class SampleGenerator:
             **kwargs: 추가 생성 설정
             
         Returns:
-            반복별 생성 결과 리스트
+            반복별 생성 결과 리스트 (latent vectors)
         """
         results = []
         
@@ -244,8 +243,8 @@ class SampleGenerator:
             
             # 이전 결과를 참조로 사용 (두 번째 반복부터)
             if i > 0 and results:
-                prev_audio = results[-1]['audio']
-                input_data.reference_audio = prev_audio
+                prev_latents = results[-1]['latents']
+                input_data.reference_latents = prev_latents
                 input_data.task = "COVER"
             
             result = self.pipeline.generate(input_data, config)
@@ -256,8 +255,8 @@ class SampleGenerator:
 
 class BatchGenerator:
     """
-    배치 생성기
-    대량 생성을 위한 효율적인 처리
+    배치 생성기 (수정됨 - Latent 출력)
+    대량 latent 생성을 위한 효율적인 처리
     """
     
     def __init__(self, pipeline: LyroPipeline):
@@ -278,7 +277,7 @@ class BatchGenerator:
             max_parallel: 최대 병렬 처리 수
             
         Returns:
-            생성 결과 리스트
+            생성 결과 리스트 (latent vectors)
         """
         if configs is None:
             configs = [GenerationConfig() for _ in inputs]
@@ -350,7 +349,7 @@ class BatchGenerator:
             **kwargs: 추가 생성 설정
             
         Returns:
-            변형 결과 리스트
+            변형 결과 리스트 (latent vectors)
         """
         results = []
         
@@ -377,7 +376,7 @@ class BatchGenerator:
         **kwargs
     ) -> List[Dict[str, Any]]:
         """
-        두 입력 간 보간 생성
+        두 입력 간 보간 생성 (수정됨 - Latent 기반)
         
         Args:
             input_a: 첫 번째 입력
@@ -386,11 +385,97 @@ class BatchGenerator:
             **kwargs: 추가 생성 설정
             
         Returns:
-            보간 결과 리스트
+            보간 결과 리스트 (latent vectors)
         """
-        return self.pipeline.interpolate(
+        return self.pipeline.interpolate_latents(
             input_a=input_a,
             input_b=input_b,
             num_steps=num_steps,
             generation_config=GenerationConfig(**kwargs)
         )
+    
+    def generate_dataset(
+        self,
+        output_dir: Union[str, Path],
+        num_samples: int = 1000,
+        tasks: List[str] = None,
+        save_interval: int = 100
+    ) -> List[str]:
+        """
+        대규모 latent 데이터셋 생성
+        
+        Args:
+            output_dir: 출력 디렉토리
+            num_samples: 생성할 샘플 수
+            tasks: 생성할 태스크 리스트
+            save_interval: 저장 간격
+            
+        Returns:
+            생성된 파일 경로 리스트
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        if tasks is None:
+            tasks = ['SONG', 'INST', 'COVER']
+        
+        generated_files = []
+        
+        for i in range(num_samples):
+            # 랜덤 태스크 선택
+            task = np.random.choice(tasks)
+            
+            # 입력 생성
+            if task == 'SONG':
+                input_data = GenerationInput(
+                    task=task,
+                    lyrics=f"Sample lyrics for song {i}",
+                    caption=f"A music piece #{i}"
+                )
+            elif task == 'INST':
+                input_data = GenerationInput(
+                    task=task,
+                    caption=f"Instrumental music piece #{i}"
+                )
+            else:  # COVER
+                # 이전 생성된 latent를 참조로 사용
+                if generated_files:
+                    prev_latents = self.pipeline.load_latents(generated_files[-1])
+                    input_data = GenerationInput(
+                        task=task,
+                        lyrics=f"Cover lyrics for song {i}",
+                        reference_latents=prev_latents
+                    )
+                else:
+                    # 첫 번째이면 SONG으로 변경
+                    input_data = GenerationInput(
+                        task='SONG',
+                        lyrics=f"Sample lyrics for song {i}"
+                    )
+            
+            # 생성
+            try:
+                result = self.pipeline.generate(input_data, GenerationConfig())
+                
+                # 파일 저장
+                filename = f"latent_{task.lower()}_{i:06d}.npy"
+                filepath = output_dir / filename
+                
+                self.pipeline.save_latents(
+                    latents=result['latents'],
+                    output_path=filepath,
+                    metadata=result.get('metadata')
+                )
+                
+                generated_files.append(str(filepath))
+                
+                # 진행상황 로깅
+                if (i + 1) % save_interval == 0:
+                    logger.info(f"Generated {i + 1}/{num_samples} latent samples")
+                
+            except Exception as e:
+                logger.error(f"Failed to generate sample {i}: {e}")
+                continue
+        
+        logger.info(f"Dataset generation completed: {len(generated_files)} files")
+        return generated_files

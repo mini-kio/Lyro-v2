@@ -1,6 +1,7 @@
 # lyro/data/processor.py
 """
-LYRO 데이터 처리 - Tokenizer + Collator 통합
+LYRO 데이터 처리 - Latent Vector 기반 (수정됨)
+Tokenizer + Collator for latent vectors
 """
 
 import torch
@@ -12,18 +13,19 @@ from dataclasses import dataclass
 
 @dataclass
 class ProcessorConfig:
-    """데이터 처리 설정"""
+    """데이터 처리 설정 (수정됨 - Latent 기반)"""
     vocab_size: int = 32000
     max_lyrics_length: int = 512
     max_caption_length: int = 256
-    max_audio_length: int = 441000  # 10초 @ 44.1kHz
-    sample_rate: int = 44100
-    pad_to_multiple: int = 256
-    ensure_stereo: bool = True
+    latent_channels: int = 16
+    latent_time_steps: int = 128
+    latent_duration: float = 10.0
+    pad_to_multiple: int = 8
+    ensure_channels: bool = True
 
 
 class LyroTokenizer:
-    """LYRO 토크나이저"""
+    """LYRO 토크나이저 (기존과 동일)"""
     
     # 특수 토큰
     SPECIAL_TOKENS = {
@@ -163,7 +165,7 @@ class LyroTokenizer:
 
 
 class LyroCollator:
-    """LYRO 데이터 콜레이터 (수정됨)"""
+    """LYRO 데이터 콜레이터 (수정됨 - Latent Vector 기반)"""
     
     def __init__(self, tokenizer: LyroTokenizer = None, config: ProcessorConfig = None, **kwargs):
         # 기존 매개변수 지원
@@ -171,16 +173,17 @@ class LyroCollator:
         self.config = config or ProcessorConfig()
         
         # kwargs에서 직접 설정 가져오기 (하위호환성)
-        self.max_audio_length = kwargs.get('max_audio_length', self.config.max_audio_length)
+        self.latent_channels = kwargs.get('latent_channels', self.config.latent_channels)
+        self.latent_time_steps = kwargs.get('latent_time_steps', self.config.latent_time_steps)
         self.max_text_length = kwargs.get('max_text_length', self.config.max_lyrics_length)
     
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        """배치 처리 (수정됨)"""
+        """배치 처리 (수정됨 - Latent Vector 기반)"""
         batch_size = len(batch)
         
         collated = {
-            'audio': None,
-            'audio_lengths': torch.zeros(batch_size, dtype=torch.long),
+            'latents': None,
+            'latent_lengths': torch.zeros(batch_size, dtype=torch.long),
             
             'lyrics': None,
             'lyrics_mask': None,
@@ -195,12 +198,12 @@ class LyroCollator:
             'genres': [],
             'ids': [],
             
-            'reference_audio': None,
+            'reference_latents': None,
             'reference_lengths': torch.zeros(batch_size, dtype=torch.long),
         }
         
-        # 오디오 처리
-        collated.update(self._collate_audio(batch))
+        # Latent vector 처리
+        collated.update(self._collate_latents(batch))
         
         # 텍스트 처리
         collated.update(self._collate_text(batch))
@@ -208,43 +211,43 @@ class LyroCollator:
         # 메타데이터 처리
         collated.update(self._collate_metadata(batch))
         
-        # 참조 오디오 처리
-        collated.update(self._collate_reference_audio(batch))
+        # 참조 latent 처리
+        collated.update(self._collate_reference_latents(batch))
         
         return collated
     
-    def _collate_audio(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
-        """오디오 배치 처리"""
-        audio_list = []
+    def _collate_latents(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
+        """Latent vector 배치 처리"""
+        latent_list = []
         lengths = []
         
         for item in batch:
-            audio = item.get('audio')
-            if audio is None:
-                audio = torch.zeros(2, self.max_audio_length)
+            latents = item.get('latents')
+            if latents is None:
+                latents = torch.zeros(self.latent_channels, self.latent_time_steps)
                 length = 0
             else:
-                if isinstance(audio, np.ndarray):
-                    audio = torch.from_numpy(audio).float()
+                if isinstance(latents, np.ndarray):
+                    latents = torch.from_numpy(latents).float()
                 
-                # 스테레오 보장
-                if self.config.ensure_stereo:
-                    audio = self._ensure_stereo(audio)
+                # 채널 수 보장
+                if self.config.ensure_channels:
+                    latents = self._ensure_channels(latents)
                 
                 # 길이 조정
-                length = audio.shape[-1]
-                audio = self._adjust_audio_length(audio)
+                length = latents.shape[-1]
+                latents = self._adjust_latent_length(latents)
             
-            audio_list.append(audio)
+            latent_list.append(latents)
             lengths.append(length)
         
         return {
-            'audio': torch.stack(audio_list, dim=0),
-            'audio_lengths': torch.tensor(lengths, dtype=torch.long)
+            'latents': torch.stack(latent_list, dim=0),
+            'latent_lengths': torch.tensor(lengths, dtype=torch.long)
         }
     
     def _collate_text(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
-        """텍스트 배치 처리 (수정됨)"""
+        """텍스트 배치 처리"""
         lyrics_texts = []
         caption_texts = []
         
@@ -294,86 +297,84 @@ class LyroCollator:
             'ids': ids,
         }
     
-    def _collate_reference_audio(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
-        """참조 오디오 배치 처리"""
-        ref_audio_list = []
+    def _collate_reference_latents(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
+        """참조 latent 배치 처리"""
+        ref_latent_list = []
         ref_lengths = []
         
         for item in batch:
-            ref_audio = item.get('reference_audio')
-            if ref_audio is None:
-                ref_audio = torch.zeros(2, self.max_audio_length)
+            ref_latents = item.get('reference_latents')
+            if ref_latents is None:
+                ref_latents = torch.zeros(self.latent_channels, self.latent_time_steps)
                 length = 0
             else:
-                if isinstance(ref_audio, np.ndarray):
-                    ref_audio = torch.from_numpy(ref_audio).float()
+                if isinstance(ref_latents, np.ndarray):
+                    ref_latents = torch.from_numpy(ref_latents).float()
                 
-                if self.config.ensure_stereo:
-                    ref_audio = self._ensure_stereo(ref_audio)
+                if self.config.ensure_channels:
+                    ref_latents = self._ensure_channels(ref_latents)
                 
-                length = ref_audio.shape[-1]
-                ref_audio = self._adjust_audio_length(ref_audio)
+                length = ref_latents.shape[-1]
+                ref_latents = self._adjust_latent_length(ref_latents)
             
-            ref_audio_list.append(ref_audio)
+            ref_latent_list.append(ref_latents)
             ref_lengths.append(length)
         
         return {
-            'reference_audio': torch.stack(ref_audio_list, dim=0),
+            'reference_latents': torch.stack(ref_latent_list, dim=0),
             'reference_lengths': torch.tensor(ref_lengths, dtype=torch.long),
         }
     
-    def _ensure_stereo(self, audio: torch.Tensor) -> torch.Tensor:
-        """스테레오 포맷 보장"""
+    def _ensure_channels(self, latents: torch.Tensor) -> torch.Tensor:
+        """채널 수 보장"""
         # 차원 정리
-        if audio.dim() == 1:
-            # (T,) -> (2, T)
-            audio = audio.unsqueeze(0).repeat(2, 1)
-        elif audio.dim() == 2:
-            if audio.shape[0] == 1:
-                # (1, T) -> (2, T)
-                audio = audio.repeat(2, 1)
-            elif audio.shape[0] > 2:
-                # (C, T) where C > 2 -> (2, T)
-                audio = audio[:2, :]
-            # audio.shape[0] == 2인 경우는 그대로 유지
-        elif audio.dim() == 3:
-            # (B, C, T) 형태인 경우 batch dimension 제거
-            if audio.shape[0] == 1:
-                audio = audio.squeeze(0)
-                return self._ensure_stereo(audio)  # 재귀 호출
-            else:
-                raise ValueError(f"Unexpected batch size in audio tensor: {audio.shape}")
-        else:
-            raise ValueError(f"Unexpected audio tensor dimensions: {audio.shape}")
+        if latents.dim() == 1:
+            # (T,) -> (1, T)
+            latents = latents.unsqueeze(0)
+        elif latents.dim() == 3 and latents.shape[0] == 1:
+            # (1, C, T) -> (C, T)
+            latents = latents.squeeze(0)
+        elif latents.dim() != 2:
+            raise ValueError(f"Unexpected latent tensor dimensions: {latents.shape}")
         
-        return audio
+        current_channels = latents.shape[0]
+        
+        if current_channels < self.latent_channels:
+            # 채널 패딩
+            pad_channels = self.latent_channels - current_channels
+            latents = torch.nn.functional.pad(latents, (0, 0, 0, pad_channels))
+        elif current_channels > self.latent_channels:
+            # 채널 크롭
+            latents = latents[:self.latent_channels, :]
+        
+        return latents
     
-    def _adjust_audio_length(self, audio: torch.Tensor) -> torch.Tensor:
-        """오디오 길이 조정"""
-        current_length = audio.shape[-1]
+    def _adjust_latent_length(self, latents: torch.Tensor) -> torch.Tensor:
+        """Latent 길이 조정"""
+        current_length = latents.shape[-1]
         
-        if current_length > self.max_audio_length:
+        if current_length > self.latent_time_steps:
             # 랜덤 크롭
-            start_idx = torch.randint(0, current_length - self.max_audio_length + 1, (1,)).item()
-            audio = audio[..., start_idx:start_idx + self.max_audio_length]
-        elif current_length < self.max_audio_length:
+            start_idx = torch.randint(0, current_length - self.latent_time_steps + 1, (1,)).item()
+            latents = latents[..., start_idx:start_idx + self.latent_time_steps]
+        elif current_length < self.latent_time_steps:
             # 제로 패딩
-            pad_length = self.max_audio_length - current_length
-            audio = F.pad(audio, (0, pad_length))
+            pad_length = self.latent_time_steps - current_length
+            latents = F.pad(latents, (0, pad_length))
         
         # pad_to_multiple 적용
         if self.config.pad_to_multiple > 1:
-            current_length = audio.shape[-1]
+            current_length = latents.shape[-1]
             pad_to = ((current_length + self.config.pad_to_multiple - 1) 
                      // self.config.pad_to_multiple) * self.config.pad_to_multiple
             if pad_to > current_length:
-                audio = F.pad(audio, (0, pad_to - current_length))
+                latents = F.pad(latents, (0, pad_to - current_length))
         
-        return audio
+        return latents
 
 
 class DataProcessor:
-    """통합 데이터 처리기"""
+    """통합 데이터 처리기 (수정됨 - Latent 기반)"""
     
     def __init__(self, config: ProcessorConfig = None):
         self.config = config or ProcessorConfig()
@@ -398,19 +399,19 @@ class DataProcessor:
         
         return processed
     
-    def process_audio_only(self, audio: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
-        """오디오만 처리"""
-        if isinstance(audio, np.ndarray):
-            audio = torch.from_numpy(audio).float()
+    def process_latents_only(self, latents: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
+        """Latent만 처리"""
+        if isinstance(latents, np.ndarray):
+            latents = torch.from_numpy(latents).float()
         
-        # 스테레오 보장
-        if self.config.ensure_stereo:
-            audio = self.collator._ensure_stereo(audio)
+        # 채널 수 보장
+        if self.config.ensure_channels:
+            latents = self.collator._ensure_channels(latents)
         
         # 길이 조정
-        audio = self.collator._adjust_audio_length(audio)
+        latents = self.collator._adjust_latent_length(latents)
         
-        return audio
+        return latents
     
     def process_text_only(self, text: str, text_type: str = 'lyrics') -> Dict[str, torch.Tensor]:
         """텍스트만 처리"""
@@ -435,17 +436,17 @@ class DataProcessor:
         task: str = "SONG",
         lyrics: Optional[str] = None,
         caption: Optional[str] = None,
-        reference_audio: Optional[torch.Tensor] = None,
+        reference_latents: Optional[torch.Tensor] = None,
         genre: Optional[List[str]] = None
     ) -> Dict[str, Any]:
-        """생성용 입력 생성"""
+        """생성용 입력 생성 (수정됨 - Latent 기반)"""
         
         generation_input = {
             'task_type': task,
             'lyrics': None,
             'lyrics_mask': None,
             'captions': None,
-            'reference_audio': None
+            'reference_latents': None
         }
         
         # 가사 처리
@@ -463,12 +464,66 @@ class DataProcessor:
             caption = f"This is a {genre_str} music piece."
             generation_input['captions'] = [caption]
         
-        # 참조 오디오 처리
-        if reference_audio is not None:
-            processed_ref = self.process_audio_only(reference_audio)
-            generation_input['reference_audio'] = processed_ref.unsqueeze(0)
+        # 참조 latent 처리
+        if reference_latents is not None:
+            processed_ref = self.process_latents_only(reference_latents)
+            generation_input['reference_latents'] = processed_ref.unsqueeze(0)
         
         return generation_input
+    
+    def augment_latents(self, latents: torch.Tensor, augmentation_prob: float = 0.5) -> torch.Tensor:
+        """Latent vector 증강"""
+        import random
+        
+        if random.random() > augmentation_prob:
+            return latents
+        
+        augmented = latents.clone()
+        
+        # Random scaling
+        if random.random() < 0.3:
+            scale_factor = random.uniform(0.9, 1.1)
+            augmented = augmented * scale_factor
+        
+        # Random noise
+        if random.random() < 0.2:
+            noise_level = random.uniform(0.005, 0.02)
+            noise = torch.randn_like(augmented) * noise_level
+            augmented = augmented + noise
+        
+        # Temporal shift
+        if random.random() < 0.1:
+            shift_amount = random.randint(-5, 5)
+            if shift_amount != 0:
+                augmented = torch.roll(augmented, shift_amount, dims=-1)
+        
+        return augmented
+    
+    def validate_latent_format(self, latents: torch.Tensor) -> bool:
+        """Latent 형식 검증"""
+        # 차원 확인
+        if latents.dim() not in [2, 3]:
+            return False
+        
+        # 채널 수 확인
+        if latents.dim() == 2:
+            channels = latents.shape[0]
+        else:
+            channels = latents.shape[1]
+        
+        if channels != self.config.latent_channels:
+            return False
+        
+        # 시간 스텝 확인
+        time_steps = latents.shape[-1]
+        if time_steps != self.config.latent_time_steps:
+            return False
+        
+        # 값 범위 확인 (일반적으로 latent는 -5 ~ 5 범위)
+        if torch.abs(latents).max() > 10:
+            return False
+        
+        return True
 
 
 def create_data_processor(config: ProcessorConfig = None) -> DataProcessor:

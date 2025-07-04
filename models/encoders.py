@@ -1,7 +1,7 @@
 # lyro/models/encoders.py
 """
-Condition Encoders for LYRO
-Lyrics, Caption (MusicCaps), and Reference Audio encoders
+Condition Encoders for LYRO (수정됨 - Generator 전용)
+Lyrics, Caption (MusicCaps), and Reference Latent encoders
 """
 
 import torch
@@ -251,34 +251,28 @@ class CaptionEncoder(nn.Module):
 
 class ReferenceEncoder(nn.Module):
     """
-    Reference audio encoder using DCAE
-    Encodes reference audio to condition generation
+    Reference latent encoder (수정됨 - DCAE 제거, latent 직접 처리)
+    Encodes reference latent vectors to condition generation
     """
     
-    def __init__(self, dcae_model, output_dim: int = 512):
+    def __init__(self, input_channels: int = 16, output_dim: int = 512):
         super().__init__()
         
-        self.dcae_model = dcae_model
+        self.input_channels = input_channels
         self.output_dim = output_dim
         
-        # Freeze DCAE
-        for param in self.dcae_model.parameters():
-            param.requires_grad = False
-            
-        # Get DCAE latent dimensions
-        latent_channels = dcae_model.latent_channels
-        latent_size = 128  # Fixed DCAE latent size
-        
-        # Reference processing network
+        # Reference latent processing network
         self.ref_processor = nn.Sequential(
-            # Reshape and process latents
-            nn.Conv1d(latent_channels, latent_channels * 2, 3, padding=1),
+            # Latent processing layers
+            nn.Conv1d(input_channels, input_channels * 2, 3, padding=1),
             nn.GELU(),
-            nn.Conv1d(latent_channels * 2, latent_channels * 4, 3, stride=2, padding=1),
+            nn.Conv1d(input_channels * 2, input_channels * 4, 3, stride=2, padding=1),
+            nn.GELU(),
+            nn.Conv1d(input_channels * 4, input_channels * 8, 3, stride=2, padding=1),
             nn.GELU(),
             nn.AdaptiveAvgPool1d(1),
             nn.Flatten(),
-            nn.Linear(latent_channels * 4, output_dim * 2),
+            nn.Linear(input_channels * 8, output_dim * 2),
             nn.GELU(),
             nn.Dropout(0.1),
             nn.Linear(output_dim * 2, output_dim),
@@ -290,30 +284,26 @@ class ReferenceEncoder(nn.Module):
             nn.Linear(output_dim, output_dim) for _ in range(3)
         ])
         
-    def forward(self, reference_audio: Optional[torch.Tensor]) -> torch.Tensor:
+    def forward(self, reference_latents: Optional[torch.Tensor]) -> torch.Tensor:
         """
         Args:
-            reference_audio: (B, 2, T) reference audio or None
+            reference_latents: (B, C, T) reference latent vectors or None
             
         Returns:
             (B, output_dim) reference embedding
         """
-        if reference_audio is None:
+        if reference_latents is None:
             # Return zero embedding
             batch_size = 1
             device = next(self.parameters()).device
             return torch.zeros(batch_size, self.output_dim, device=device)
             
-        batch_size = reference_audio.shape[0]
-        device = reference_audio.device
+        batch_size = reference_latents.shape[0]
+        device = reference_latents.device
         
         try:
-            # Encode with DCAE
-            with torch.no_grad():
-                latents, _ = self.dcae_model.encode(reference_audio)
-                
-            # Process latents
-            ref_embedding = self.ref_processor(latents)
+            # Process reference latents
+            ref_embedding = self.ref_processor(reference_latents)
             
             # Apply style transformations
             for layer in self.style_layers:
@@ -326,30 +316,30 @@ class ReferenceEncoder(nn.Module):
             # Return zero embedding on failure
             return torch.zeros(batch_size, self.output_dim, device=device)
             
-    def extract_style_features(self, reference_audio: torch.Tensor, num_features: int = 8) -> torch.Tensor:
+    def extract_style_features(self, reference_latents: torch.Tensor, num_features: int = 8) -> torch.Tensor:
         """
-        Extract multiple style features from reference audio
+        Extract multiple style features from reference latents
         
         Args:
-            reference_audio: (B, 2, T) reference audio
+            reference_latents: (B, C, T) reference latent vectors
             num_features: Number of style features to extract
             
         Returns:
             (B, num_features, output_dim) style features
         """
-        batch_size = reference_audio.shape[0]
+        batch_size = reference_latents.shape[0]
         
-        # Segment audio into multiple parts
-        segment_length = reference_audio.shape[-1] // num_features
+        # Segment latents into multiple parts
+        segment_length = reference_latents.shape[-1] // num_features
         style_features = []
         
         for i in range(num_features):
             start_idx = i * segment_length
-            end_idx = (i + 1) * segment_length if i < num_features - 1 else reference_audio.shape[-1]
+            end_idx = (i + 1) * segment_length if i < num_features - 1 else reference_latents.shape[-1]
             
-            segment = reference_audio[..., start_idx:end_idx]
-            if segment.shape[-1] < 1000:  # Too short
-                segment = F.pad(segment, (0, 1000 - segment.shape[-1]))
+            segment = reference_latents[..., start_idx:end_idx]
+            if segment.shape[-1] < 8:  # Too short
+                segment = F.pad(segment, (0, 8 - segment.shape[-1]))
                 
             segment_feature = self.forward(segment)
             style_features.append(segment_feature)
@@ -359,7 +349,7 @@ class ReferenceEncoder(nn.Module):
 
 class MultiModalEncoder(nn.Module):
     """
-    Multi-modal encoder that combines all condition types
+    Multi-modal encoder that combines all condition types (수정됨 - Reference latent 사용)
     """
     
     def __init__(
@@ -406,7 +396,7 @@ class MultiModalEncoder(nn.Module):
         self,
         lyrics_tokens: Optional[torch.Tensor] = None,
         captions: Optional[list] = None,
-        reference_audio: Optional[torch.Tensor] = None,
+        reference_latents: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         """
@@ -415,7 +405,7 @@ class MultiModalEncoder(nn.Module):
         Args:
             lyrics_tokens: (B, L) lyrics token IDs
             captions: List of caption strings
-            reference_audio: (B, 2, T) reference audio
+            reference_latents: (B, C, T) reference latent vectors
             attention_mask: (B, L) lyrics attention mask
             
         Returns:
@@ -424,7 +414,7 @@ class MultiModalEncoder(nn.Module):
         batch_size = (
             lyrics_tokens.shape[0] if lyrics_tokens is not None else
             len(captions) if captions is not None else
-            reference_audio.shape[0] if reference_audio is not None else 1
+            reference_latents.shape[0] if reference_latents is not None else 1
         )
         
         device = next(self.parameters()).device
@@ -446,9 +436,9 @@ class MultiModalEncoder(nn.Module):
         else:
             embeddings['caption'] = torch.zeros(batch_size, self.fusion_dim, device=device)
             
-        # Reference
-        if reference_audio is not None:
-            reference_emb = self.reference_encoder(reference_audio)
+        # Reference latents
+        if reference_latents is not None:
+            reference_emb = self.reference_encoder(reference_latents)
             embeddings['reference'] = self.reference_proj(reference_emb)
         else:
             embeddings['reference'] = torch.zeros(batch_size, self.fusion_dim, device=device)

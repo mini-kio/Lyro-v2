@@ -1,8 +1,7 @@
 """
-LYRO Models Package (수정됨 - 중복 제거 및 통합 DCAE + Vocoder)
+LYRO Models Package (수정됨 - Generator 전용)
 """
 
-from .dcae import MusicDCAE, AdvancedVocoder, create_dcae_model
 from .generator import LyroGenerator, GeneratorConfig, create_lyro_generator
 from .ssm_flow import SSMFlowGenerator, create_ssm_flow_generator
 from .encoders import CaptionEncoder, LyricsEncoder, ReferenceEncoder
@@ -16,11 +15,6 @@ from .losses import (
 from .sampling import FlowMatchingSampler
 
 __all__ = [
-    # Pretrained DCAE + Vocoder (통합됨)
-    'MusicDCAE',
-    'AdvancedVocoder',
-    'create_dcae_model',
-    
     # Generator
     'LyroGenerator',
     'GeneratorConfig',
@@ -50,7 +44,7 @@ __all__ = [
 
 def create_lyro_models(config):
     """
-    LYRO 모델 스위트 생성 (수정됨: 통합 DCAE + Vocoder 사용)
+    LYRO 모델 스위트 생성 (수정됨: Generator 전용)
     
     Args:
         config: 모델 설정
@@ -59,14 +53,6 @@ def create_lyro_models(config):
         dict: 모델 딕셔너리
     """
     models = {}
-    
-    # 프리트레인된 DCAE + Vocoder (훈련하지 않음) - 통합 모델 사용
-    models['dcae'] = create_dcae_model(
-        model_name=config.dcae.model_name,
-        cache_dir=config.dcae.cache_dir,
-        use_vocoder=getattr(config.dcae, 'use_vocoder', True),
-        sample_rate=config.dcae.sample_rate
-    )
     
     # Generator (SSM + Flow Matching, 훈련 대상)
     models['generator'] = create_ssm_flow_generator(
@@ -90,7 +76,8 @@ def create_lyro_models(config):
     )
     
     models['reference_encoder'] = ReferenceEncoder(
-        dcae_model=models['dcae']
+        input_channels=config.generator.latent_channels,
+        output_dim=config.encoder.reference_embed_dim
     )
     
     return models
@@ -146,43 +133,33 @@ def create_loss_functions(config):
 
 
 def get_model_info():
-    """모델 아키텍처 정보 (수정됨)"""
+    """모델 아키텍처 정보 (수정됨 - Generator 전용)"""
     return {
-        'dcae': {
-            'type': 'Pretrained ACE-Step + Advanced Vocoder',
-            'model_name': 'ACE-Step/ACE-Step-v1-3.5B',
-            'components': ['music_dcae_f8c8', 'music_vocoder'],
-            'latent_channels': 16,
-            'compression_ratio': '~50:1',
-            'trainable': False,
-            'vocoder_integrated': True
-        },
         'ssm_generator': {
             'parameters': '~1.5B', 
             'architecture': 'S6 + Flow Matching',
             'conditions': ['lyrics', 'captions', 'reference'],
-            'trainable': True
+            'trainable': True,
+            'output_format': 'latent_vectors'
         },
         'encoders': {
             'caption': 'Pretrained Text Encoder',
             'lyrics': 'Custom Tokenizer + Embedding',
-            'reference': 'DCAE-based'
+            'reference': 'Latent-based'
         },
         'total_trainable_parameters': '~1.5B',
-        'pipeline': 'Text → Generator → Latents → DCAE + Vocoder → Audio',
-        'audio_quality': 'High (Vocoder-enhanced)'
+        'pipeline': 'Text → Generator → Latent Vectors',
+        'audio_synthesis': 'External Vocoder Required'
     }
 
 
 def estimate_model_memory(config):
-    """모델 메모리 사용량 추정 (수정됨)"""
+    """모델 메모리 사용량 추정 (수정됨 - Generator 전용)"""
     memory_estimate = {
-        'dcae_encoder': 2.0,  # GB (frozen)
-        'advanced_vocoder': 0.8,  # GB (frozen, HiFi-GAN style)
         'generator': 3.0,     # GB (1.5B params in fp16)
         'encoders': 0.3,      # GB
         'training_overhead': 2.0,  # GB (gradients, optimizer states)
-        'batch_data': config.generator.batch_size * 0.5,  # GB per batch
+        'batch_data': config.generator.batch_size * 0.2,  # GB per batch (latents only)
     }
     
     total_memory = sum(memory_estimate.values())
@@ -191,6 +168,6 @@ def estimate_model_memory(config):
         'breakdown': memory_estimate,
         'total_estimated': f"{total_memory:.1f} GB",
         'recommended_gpu': "RTX 4090 (24GB)" if total_memory <= 24 else "H100 (80GB)",
-        'note': 'Estimates include DCAE + Advanced Vocoder + Generator in mixed precision',
-        'vocoder_overhead': 'Included (0.8GB for HiFi-GAN style vocoder)'
+        'note': 'Estimates for Generator-only training with latent vectors',
+        'audio_synthesis': 'Requires external vocoder for audio generation'
     }

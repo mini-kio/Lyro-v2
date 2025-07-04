@@ -1,7 +1,7 @@
 # lyro/inference/__init__.py
 """
-LYRO 추론 패키지
-음악 생성 파이프라인과 생성기
+LYRO 추론 패키지 (수정됨 - Generator 전용)
+Latent Vector 생성 파이프라인과 생성기
 """
 
 from .pipeline import (
@@ -32,11 +32,10 @@ __all__ = [
 
 
 def create_simple_pipeline(
-    dcae_checkpoint: str,
     generator_checkpoint: str,
     device: str = "auto"
 ):
-    """간단한 파이프라인 생성 헬퍼 (DCAE + Vocoder 포함)"""
+    """간단한 파이프라인 생성 헬퍼 (수정됨 - Generator 전용)"""
     from training.config import LyroConfig
     
     # 기본 설정
@@ -47,9 +46,8 @@ def create_simple_pipeline(
         import torch
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # DCAE + Vocoder 파이프라인 생성
+    # Generator 전용 파이프라인 생성
     pipeline = LyroPipeline.from_pretrained(
-        dcae_model_name=dcae_checkpoint,
         generator_checkpoint=generator_checkpoint,
         cache_dir="checkpoints",
         device=device
@@ -59,16 +57,15 @@ def create_simple_pipeline(
 
 
 def quick_generate(
-    dcae_checkpoint: str,
     generator_checkpoint: str,
     lyrics: str = None,
     caption: str = None,
     duration: float = 10.0,
     output_path: str = None
 ):
-    """빠른 생성 헬퍼 함수 (올바른 DCAE + Vocoder 파이프라인)"""
+    """빠른 생성 헬퍼 함수 (수정됨 - Latent 출력)"""
     # 파이프라인 생성
-    pipeline = create_simple_pipeline(dcae_checkpoint, generator_checkpoint)
+    pipeline = create_simple_pipeline(generator_checkpoint)
     
     # 입력 준비
     generation_input = GenerationInput(
@@ -88,8 +85,8 @@ def quick_generate(
     
     # 저장
     if output_path:
-        pipeline.save_audio(
-            audio=result['audio'],
+        pipeline.save_latents(
+            latents=result['latents'],
             output_path=output_path,
             metadata=result.get('metadata')
         )

@@ -1,16 +1,14 @@
 # lyro/models/losses.py
 """
-Generator Loss Functions for LYRO (DCAE 관련 손실 제거)
-Flow Matching, REPA (HuBERT), Reconstruction, Perceptual losses만 포함
+Generator Loss Functions for LYRO (수정됨 - Generator 전용)
+Flow Matching, Latent Consistency, Reconstruction losses for latent vectors
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchaudio
 import numpy as np
 from typing import Dict, Optional, Tuple, List
-from transformers import HubertModel, Wav2Vec2FeatureExtractor
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -81,210 +79,80 @@ class FlowMatchingLoss(nn.Module):
         return loss
 
 
-class REPALoss(nn.Module):
+class LatentConsistencyLoss(nn.Module):
     """
-    REPA Loss using frozen HuBERT features
-    Based on ZhenYe234/hubert_base_general_audio
+    Latent Consistency Loss for maintaining coherent latent representations
     """
     
     def __init__(
         self,
-        hubert_model: str = "ZhenYe234/hubert_base_general_audio",
-        layer_weights: Optional[List[float]] = None,
-        sample_rate: int = 44100,
-        target_sample_rate: int = 16000
+        consistency_weight: float = 1.0,
+        temporal_weight: float = 0.5,
+        channel_weight: float = 0.3
     ):
         super().__init__()
         
-        self.sample_rate = sample_rate
-        self.target_sample_rate = target_sample_rate
+        self.consistency_weight = consistency_weight
+        self.temporal_weight = temporal_weight
+        self.channel_weight = channel_weight
         
-        try:
-            # Load HuBERT model and feature extractor
-            self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(hubert_model)
-            self.hubert = HubertModel.from_pretrained(hubert_model)
-            
-            # Freeze HuBERT parameters
-            for param in self.hubert.parameters():
-                param.requires_grad = False
-                
-            self.hubert.eval()
-            
-            # Layer weights for multi-layer features
-            if layer_weights is None:
-                # Default: use middle layers more
-                num_layers = len(self.hubert.encoder.layers)
-                layer_weights = [0.1] * 4 + [1.0] * (num_layers - 8) + [0.1] * 4
-                layer_weights = layer_weights[:num_layers]
-                
-            self.layer_weights = nn.Parameter(
-                torch.tensor(layer_weights, dtype=torch.float32),
-                requires_grad=False
-            )
-            
-            print(f"Loaded HuBERT model with {num_layers} layers")
-            
-        except Exception as e:
-            print(f"Warning: Failed to load HuBERT model: {e}")
-            print("Using fallback REPA loss")
-            
-            # Fallback: simple convolutional feature extractor
-            self.hubert = None
-            self.feature_extractor = None
-            
-            self.fallback_features = nn.Sequential(
-                nn.Conv1d(1, 64, 7, stride=2, padding=3),
-                nn.ReLU(),
-                nn.Conv1d(64, 128, 5, stride=2, padding=2),
-                nn.ReLU(),
-                nn.Conv1d(128, 256, 3, stride=2, padding=1),
-                nn.ReLU(),
-                nn.Conv1d(256, 512, 3, stride=2, padding=1),
-                nn.ReLU(),
-                nn.AdaptiveAvgPool1d(100)
-            )
-            
-            # Freeze fallback features
-            for param in self.fallback_features.parameters():
-                param.requires_grad = False
-                
-    def _preprocess_audio(self, audio: torch.Tensor) -> torch.Tensor:
-        """Preprocess audio for HuBERT"""
-        # Convert to mono
-        if audio.dim() > 1 and audio.shape[-2] > 1:
-            audio = audio.mean(dim=-2, keepdim=True)
-            
-        # Resample if needed
-        if self.sample_rate != self.target_sample_rate:
-            resampler = torchaudio.transforms.Resample(
-                self.sample_rate, self.target_sample_rate
-            ).to(audio.device)
-            audio = resampler(audio)
-            
-        return audio
-    
-    def _extract_hubert_features(self, audio: torch.Tensor) -> torch.Tensor:
-        """Extract multi-layer HuBERT features"""
-        batch_size = audio.shape[0]
-        device = audio.device
-        
-        features = []
-        
-        for i in range(batch_size):
-            # Process each sample individually
-            sample = audio[i].squeeze().cpu().numpy()
-            
-            try:
-                # Extract features using feature extractor
-                inputs = self.feature_extractor(
-                    sample,
-                    sampling_rate=self.target_sample_rate,
-                    return_tensors="pt"
-                )
-                
-                # Move to correct device
-                input_values = inputs.input_values.to(device)
-                
-                # Get HuBERT features
-                with torch.no_grad():
-                    outputs = self.hubert(input_values, output_hidden_states=True)
-                    hidden_states = outputs.hidden_states
-                    
-                # Weighted combination of layers
-                weighted_features = torch.zeros_like(hidden_states[0])
-                total_weight = 0
-                
-                for layer_idx, weight in enumerate(self.layer_weights):
-                    if layer_idx < len(hidden_states):
-                        weighted_features += weight * hidden_states[layer_idx]
-                        total_weight += weight
-                        
-                if total_weight > 0:
-                    weighted_features = weighted_features / total_weight
-                    
-                features.append(weighted_features.squeeze(0))
-                
-            except Exception as e:
-                print(f"Warning: HuBERT feature extraction failed for sample {i}: {e}")
-                # Fallback to zero features
-                fallback_shape = (500, 768)  # Typical HuBERT output shape
-                fallback_features = torch.zeros(fallback_shape, device=device)
-                features.append(fallback_features)
-                
-        # Stack features
-        try:
-            # Pad to same length
-            max_len = max(f.shape[0] for f in features)
-            padded_features = []
-            
-            for f in features:
-                if f.shape[0] < max_len:
-                    pad_len = max_len - f.shape[0]
-                    f = F.pad(f, (0, 0, 0, pad_len))
-                padded_features.append(f)
-                
-            return torch.stack(padded_features, dim=0)
-            
-        except Exception as e:
-            print(f"Warning: Feature stacking failed: {e}")
-            # Return zero tensor
-            return torch.zeros(batch_size, 500, 768, device=device)
-    
-    def _extract_fallback_features(self, audio: torch.Tensor) -> torch.Tensor:
-        """Extract features using fallback CNN"""
-        # Convert to mono if needed
-        if audio.dim() > 2:
-            audio = audio.mean(dim=1, keepdim=True)
-        elif audio.dim() == 2 and audio.shape[0] > 1:
-            audio = audio.mean(dim=0, keepdim=True).unsqueeze(0)
-            
-        return self.fallback_features(audio)
-    
     def forward(
         self,
-        predicted_audio: torch.Tensor,
-        target_audio: torch.Tensor
+        predicted_latents: torch.Tensor,
+        target_latents: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute REPA loss between predicted and target audio
+        Compute latent consistency loss
         
         Args:
-            predicted_audio: (B, 2, T) predicted audio
-            target_audio: (B, 2, T) target audio
+            predicted_latents: (B, C, T) predicted latent vectors
+            target_latents: (B, C, T) target latent vectors
             
         Returns:
-            REPA loss
+            Latent consistency loss
         """
-        # Preprocess audio
-        pred_processed = self._preprocess_audio(predicted_audio)
-        target_processed = self._preprocess_audio(target_audio)
+        # Basic reconstruction loss
+        recon_loss = F.mse_loss(predicted_latents, target_latents)
         
-        # Extract features
-        if self.hubert is not None:
-            pred_features = self._extract_hubert_features(pred_processed)
-            target_features = self._extract_hubert_features(target_processed)
-        else:
-            pred_features = self._extract_fallback_features(pred_processed)
-            target_features = self._extract_fallback_features(target_processed)
-            
-        # Compute feature matching loss
-        feature_loss = F.l1_loss(pred_features, target_features)
+        # Temporal consistency (neighboring time steps should be similar)
+        pred_temporal_diff = torch.diff(predicted_latents, dim=-1)
+        target_temporal_diff = torch.diff(target_latents, dim=-1)
+        temporal_loss = F.mse_loss(pred_temporal_diff, target_temporal_diff)
         
-        # Additional perceptual losses
-        cosine_loss = 1 - F.cosine_similarity(
-            pred_features.flatten(1), 
-            target_features.flatten(1),
-            dim=1
-        ).mean()
+        # Channel correlation (channels should maintain relative relationships)
+        pred_channel_corr = self._compute_channel_correlation(predicted_latents)
+        target_channel_corr = self._compute_channel_correlation(target_latents)
+        channel_loss = F.mse_loss(pred_channel_corr, target_channel_corr)
         
-        # Combine losses
-        total_loss = feature_loss + 0.1 * cosine_loss
+        # Combined loss
+        total_loss = (
+            self.consistency_weight * recon_loss +
+            self.temporal_weight * temporal_loss +
+            self.channel_weight * channel_loss
+        )
         
         return total_loss
+    
+    def _compute_channel_correlation(self, latents: torch.Tensor) -> torch.Tensor:
+        """Compute correlation matrix between channels"""
+        B, C, T = latents.shape
+        
+        # Reshape to (B, C, T) -> (B*T, C)
+        latents_flat = latents.permute(0, 2, 1).reshape(-1, C)
+        
+        # Compute correlation matrix
+        latents_centered = latents_flat - latents_flat.mean(dim=0, keepdim=True)
+        cov_matrix = torch.mm(latents_centered.T, latents_centered) / (latents_centered.shape[0] - 1)
+        
+        # Normalize to correlation
+        std_dev = torch.sqrt(torch.diag(cov_matrix)).unsqueeze(0)
+        corr_matrix = cov_matrix / (std_dev.T @ std_dev + 1e-8)
+        
+        return corr_matrix
 
 
-class ReconstructionLoss(nn.Module):
-    """Multi-scale reconstruction loss"""
+class LatentReconstructionLoss(nn.Module):
+    """Multi-scale reconstruction loss for latent vectors"""
     
     def __init__(
         self,
@@ -300,11 +168,11 @@ class ReconstructionLoss(nn.Module):
         
     def forward(self, predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
-        Compute reconstruction loss
+        Compute reconstruction loss for latent vectors
         
         Args:
-            predicted: (B, 2, T) predicted audio
-            target: (B, 2, T) target audio
+            predicted: (B, C, T) predicted latent vectors
+            target: (B, C, T) target latent vectors
             
         Returns:
             Reconstruction loss
@@ -320,13 +188,13 @@ class ReconstructionLoss(nn.Module):
         
         total_loss = self.l1_weight * l1_loss + self.l2_weight * l2_loss
         
-        # Multi-scale loss
+        # Multi-scale loss for latent vectors
         if self.use_multi_scale:
-            scales = [2, 4, 8, 16]
+            scales = [2, 4, 8]
             
             for scale in scales:
-                if min_length // scale > 10:
-                    # Downsample
+                if min_length // scale > 4:
+                    # Downsample latents
                     pred_ds = F.avg_pool1d(predicted, scale, scale)
                     target_ds = F.avg_pool1d(target, scale, scale)
                     
@@ -337,53 +205,35 @@ class ReconstructionLoss(nn.Module):
         return total_loss
 
 
-class PerceptualLoss(nn.Module):
-    """Perceptual loss using spectral features"""
+class LatentPerceptualLoss(nn.Module):
+    """Perceptual loss for latent vectors using statistical features"""
     
     def __init__(
         self,
-        sample_rate: int = 44100,
-        mel_weight: float = 1.0,
-        stft_weight: float = 0.5
+        stat_weight: float = 1.0,
+        spectral_weight: float = 0.5
     ):
         super().__init__()
         
-        self.sample_rate = sample_rate
-        self.mel_weight = mel_weight
-        self.stft_weight = stft_weight
-        
-        # Mel spectrogram
-        self.mel_transform = torchaudio.transforms.MelSpectrogram(
-            sample_rate=sample_rate,
-            n_fft=1024,
-            hop_length=256,
-            n_mels=80,
-            f_min=0.0,
-            f_max=sample_rate // 2
-        )
-        
-        # Multiple STFT scales
-        self.stft_scales = [512, 1024, 2048]
+        self.stat_weight = stat_weight
+        self.spectral_weight = spectral_weight
         
     def forward(self, predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
-        Compute perceptual loss
+        Compute perceptual loss for latent vectors
         
         Args:
-            predicted: (B, 2, T) predicted audio
-            target: (B, 2, T) target audio
+            predicted: (B, C, T) predicted latent vectors
+            target: (B, C, T) target latent vectors
             
         Returns:
             Perceptual loss
         """
         device = predicted.device
         
-        # Move mel transform to correct device
-        self.mel_transform = self.mel_transform.to(device)
-        
         # Match lengths
         min_length = min(predicted.shape[-1], target.shape[-1])
-        if min_length < 1024:
+        if min_length < 8:
             return torch.tensor(0.0, device=device, requires_grad=True)
             
         predicted = predicted[..., :min_length]
@@ -391,78 +241,132 @@ class PerceptualLoss(nn.Module):
         
         total_loss = 0.0
         
-        # Convert to mono for spectral analysis
-        pred_mono = predicted.mean(dim=-2) if predicted.dim() > 1 else predicted
-        target_mono = target.mean(dim=-2) if target.dim() > 1 else target
+        # Statistical features loss
+        stat_loss = self._compute_statistical_loss(predicted, target)
+        total_loss += self.stat_weight * stat_loss
         
-        # Mel spectrogram loss
-        try:
-            pred_mel = self.mel_transform(pred_mono)
-            target_mel = self.mel_transform(target_mono)
-            mel_loss = F.l1_loss(pred_mel, target_mel)
-            total_loss += self.mel_weight * mel_loss
-        except Exception:
-            pass
-            
-        # Multi-scale STFT loss
-        for n_fft in self.stft_scales:
-            if min_length >= n_fft:
-                hop_length = n_fft // 4
-                
-                try:
-                    window = torch.hann_window(n_fft, device=device)
-                    
-                    pred_stft = torch.stft(
-                        pred_mono.reshape(-1),
-                        n_fft=n_fft,
-                        hop_length=hop_length,
-                        return_complex=True,
-                        window=window
-                    )
-                    
-                    target_stft = torch.stft(
-                        target_mono.reshape(-1),
-                        n_fft=n_fft,
-                        hop_length=hop_length,
-                        return_complex=True,
-                        window=window
-                    )
-                    
-                    # Magnitude loss
-                    stft_loss = F.l1_loss(torch.abs(pred_stft), torch.abs(target_stft))
-                    total_loss += self.stft_weight * stft_loss / len(self.stft_scales)
-                    
-                except Exception:
-                    continue
+        # Spectral features loss (FFT of latent vectors)
+        spectral_loss = self._compute_spectral_loss(predicted, target)
+        total_loss += self.spectral_weight * spectral_loss
                     
         return total_loss if total_loss > 0 else torch.tensor(0.1, device=device, requires_grad=True)
+    
+    def _compute_statistical_loss(self, predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Compute loss based on statistical moments"""
+        # Mean
+        pred_mean = torch.mean(predicted, dim=-1)
+        target_mean = torch.mean(target, dim=-1)
+        mean_loss = F.mse_loss(pred_mean, target_mean)
+        
+        # Variance
+        pred_var = torch.var(predicted, dim=-1)
+        target_var = torch.var(target, dim=-1)
+        var_loss = F.mse_loss(pred_var, target_var)
+        
+        # Skewness (third moment)
+        pred_centered = predicted - pred_mean.unsqueeze(-1)
+        target_centered = target - target_mean.unsqueeze(-1)
+        
+        pred_skew = torch.mean(pred_centered ** 3, dim=-1)
+        target_skew = torch.mean(target_centered ** 3, dim=-1)
+        skew_loss = F.mse_loss(pred_skew, target_skew)
+        
+        return mean_loss + 0.5 * var_loss + 0.2 * skew_loss
+    
+    def _compute_spectral_loss(self, predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Compute loss based on frequency domain features"""
+        try:
+            # FFT of latent vectors
+            pred_fft = torch.fft.fft(predicted, dim=-1)
+            target_fft = torch.fft.fft(target, dim=-1)
+            
+            # Magnitude spectrum
+            pred_mag = torch.abs(pred_fft)
+            target_mag = torch.abs(target_fft)
+            
+            # Spectral loss
+            spectral_loss = F.l1_loss(pred_mag, target_mag)
+            
+            return spectral_loss
+            
+        except Exception:
+            return torch.tensor(0.0, device=predicted.device)
+
+
+class LatentRegularizationLoss(nn.Module):
+    """Regularization loss for latent vectors to encourage smooth and realistic distributions"""
+    
+    def __init__(
+        self,
+        smoothness_weight: float = 0.1,
+        sparsity_weight: float = 0.05,
+        norm_weight: float = 0.1
+    ):
+        super().__init__()
+        
+        self.smoothness_weight = smoothness_weight
+        self.sparsity_weight = sparsity_weight
+        self.norm_weight = norm_weight
+        
+    def forward(self, latents: torch.Tensor) -> torch.Tensor:
+        """
+        Compute regularization loss for latent vectors
+        
+        Args:
+            latents: (B, C, T) latent vectors
+            
+        Returns:
+            Regularization loss
+        """
+        total_loss = 0.0
+        
+        # Smoothness loss (encourage temporal smoothness)
+        if self.smoothness_weight > 0:
+            temporal_diff = torch.diff(latents, dim=-1)
+            smoothness_loss = torch.mean(temporal_diff ** 2)
+            total_loss += self.smoothness_weight * smoothness_loss
+        
+        # Sparsity loss (encourage some channels to be inactive)
+        if self.sparsity_weight > 0:
+            l1_norm = torch.mean(torch.abs(latents))
+            total_loss += self.sparsity_weight * l1_norm
+        
+        # Norm regularization (prevent explosion)
+        if self.norm_weight > 0:
+            l2_norm = torch.mean(latents ** 2)
+            total_loss += self.norm_weight * l2_norm
+        
+        return total_loss
 
 
 class CombinedLoss(nn.Module):
-    """Combined loss function for LYRO Generator training"""
+    """Combined loss function for LYRO Generator training (수정됨 - Latent 전용)"""
     
     def __init__(
         self,
         flow_loss: FlowMatchingLoss,
-        repa_loss: REPALoss,
-        recon_loss: ReconstructionLoss,
-        perceptual_loss: PerceptualLoss,
+        consistency_loss: LatentConsistencyLoss = None,
+        recon_loss: LatentReconstructionLoss = None,
+        perceptual_loss: LatentPerceptualLoss = None,
+        regularization_loss: LatentRegularizationLoss = None,
         weights: Dict[str, float] = None
     ):
         super().__init__()
         
         self.flow_loss = flow_loss
-        self.repa_loss = repa_loss
-        self.recon_loss = recon_loss
-        self.perceptual_loss = perceptual_loss
+        self.consistency_loss = consistency_loss or LatentConsistencyLoss()
+        self.recon_loss = recon_loss or LatentReconstructionLoss()
+        self.perceptual_loss = perceptual_loss or LatentPerceptualLoss()
+        self.regularization_loss = regularization_loss or LatentRegularizationLoss()
         
         # Default weights
         if weights is None:
             weights = {
                 'flow': 1.0,
-                'repa': 0.1,
+                'consistency': 0.3,
                 'recon': 0.5,
-                'perceptual': 0.2
+                'perceptual': 0.2,
+                'regularization': 0.1
             }
         self.weights = weights
         
@@ -470,19 +374,19 @@ class CombinedLoss(nn.Module):
         self,
         predicted_v: torch.Tensor,
         target_v: torch.Tensor,
-        predicted_audio: torch.Tensor,
-        target_audio: torch.Tensor,
+        predicted_latents: torch.Tensor,
+        target_latents: torch.Tensor,
         t: torch.Tensor,
         mask: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         """
-        Compute combined loss
+        Compute combined loss for latent vector generation
         
         Args:
             predicted_v: (B, C, L) predicted velocity
             target_v: (B, C, L) target velocity
-            predicted_audio: (B, 2, T) predicted audio
-            target_audio: (B, 2, T) target audio
+            predicted_latents: (B, C, L) predicted latent vectors
+            target_latents: (B, C, L) target latent vectors
             t: (B,) time steps
             mask: (B, C, L) optional mask
             
@@ -495,24 +399,29 @@ class CombinedLoss(nn.Module):
         flow_loss = self.flow_loss(predicted_v, target_v, t, mask)
         losses['flow'] = flow_loss
         
-        # REPA loss
-        repa_loss = self.repa_loss(predicted_audio, target_audio)
-        losses['repa'] = repa_loss
+        # Latent consistency loss
+        consistency_loss = self.consistency_loss(predicted_latents, target_latents)
+        losses['consistency'] = consistency_loss
         
         # Reconstruction loss
-        recon_loss = self.recon_loss(predicted_audio, target_audio)
+        recon_loss = self.recon_loss(predicted_latents, target_latents)
         losses['recon'] = recon_loss
         
         # Perceptual loss
-        perceptual_loss = self.perceptual_loss(predicted_audio, target_audio)
+        perceptual_loss = self.perceptual_loss(predicted_latents, target_latents)
         losses['perceptual'] = perceptual_loss
+        
+        # Regularization loss
+        regularization_loss = self.regularization_loss(predicted_latents)
+        losses['regularization'] = regularization_loss
         
         # Compute total loss
         total_loss = (
             self.weights.get('flow', 1.0) * flow_loss +
-            self.weights.get('repa', 0.1) * repa_loss +
+            self.weights.get('consistency', 0.3) * consistency_loss +
             self.weights.get('recon', 0.5) * recon_loss +
-            self.weights.get('perceptual', 0.2) * perceptual_loss
+            self.weights.get('perceptual', 0.2) * perceptual_loss +
+            self.weights.get('regularization', 0.1) * regularization_loss
         )
             
         losses['total'] = total_loss
@@ -522,3 +431,26 @@ class CombinedLoss(nn.Module):
     def update_weights(self, new_weights: Dict[str, float]):
         """Update loss weights"""
         self.weights.update(new_weights)
+
+
+# Legacy classes for backward compatibility (simplified)
+class REPALoss(nn.Module):
+    """Simplified REPA Loss for backward compatibility"""
+    
+    def __init__(self, hubert_model: str = None, layer_weights: List[float] = None):
+        super().__init__()
+        print("Warning: REPALoss simplified for latent-only training")
+        
+    def forward(self, predicted_audio: torch.Tensor, target_audio: torch.Tensor) -> torch.Tensor:
+        # Return dummy loss for compatibility
+        return torch.tensor(0.0, device=predicted_audio.device, requires_grad=True)
+
+
+class ReconstructionLoss(LatentReconstructionLoss):
+    """Alias for LatentReconstructionLoss"""
+    pass
+
+
+class PerceptualLoss(LatentPerceptualLoss):
+    """Alias for LatentPerceptualLoss"""
+    pass
