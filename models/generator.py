@@ -310,6 +310,12 @@ class ConditionProcessor(nn.Module):
     ) -> torch.Tensor:
         device = next(self.parameters()).device
         
+        # 실제 배치 크기 결정 (latent 텐서에서 추론)
+        if lyrics is not None:
+            actual_batch_size = lyrics.shape[0]
+        else:
+            actual_batch_size = batch_size
+        
         # 가사 처리
         if lyrics is not None:
             lyrics_embed = self.lyrics_embed(lyrics)
@@ -317,26 +323,26 @@ class ConditionProcessor(nn.Module):
                 lyrics_embed = lyrics_embed * lyrics_mask.unsqueeze(-1)
             lyrics_embed = lyrics_embed.mean(dim=1)
         else:
-            lyrics_embed = torch.zeros(batch_size, self.config.d_model, device=device)
+            lyrics_embed = torch.zeros(actual_batch_size, self.config.d_model, device=device)
         
         # 캡션 처리 (간단한 더미 구현)
         if captions is not None:
             # 실제로는 사전훈련된 텍스트 인코더 필요
-            caption_embed = torch.randn(batch_size, 768, device=device)
+            caption_embed = torch.randn(actual_batch_size, 768, device=device)
             caption_embed = self.caption_proj(caption_embed)
         else:
-            caption_embed = torch.zeros(batch_size, self.config.d_model, device=device)
+            caption_embed = torch.zeros(actual_batch_size, self.config.d_model, device=device)
         
         # 참조 오디오 처리
         if reference_audio is not None:
             ref_flat = reference_audio.flatten(1)
             reference_embed = self.reference_proj(ref_flat)
         else:
-            reference_embed = torch.zeros(batch_size, self.config.d_model, device=device)
+            reference_embed = torch.zeros(actual_batch_size, self.config.d_model, device=device)
         
         # 태스크 임베딩
         task_id = self._get_task_id(task_type)
-        task_embed = self.task_embedding(torch.tensor([task_id], device=device).expand(batch_size))
+        task_embed = self.task_embedding(torch.tensor([task_id], device=device).expand(actual_batch_size))
         
         # 모든 조건 융합
         all_embeds = torch.cat([lyrics_embed, caption_embed, reference_embed, task_embed], dim=-1)

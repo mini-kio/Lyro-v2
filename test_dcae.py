@@ -376,7 +376,7 @@ class DCPipelineTester:
             batch_size = 1
             device = self.device
             
-            # 더미 조건들
+            # 더미 조건들 (배치 크기 일치)
             lyrics = torch.randint(0, 1000, (batch_size, 50), device=device)
             lyrics_mask = torch.ones_like(lyrics, dtype=torch.bool)
             captions = ["This is a test music piece"]
@@ -418,6 +418,24 @@ class DCPipelineTester:
                 print(f"   🔍 Debug: lyrics shape: {lyrics.shape}")
                 print(f"   🔍 Debug: lyrics_mask shape: {lyrics_mask.shape}")
                 
+                # 배치 크기 확인 및 조정
+                latent_batch_size = target_latents_3d.shape[0]
+                condition_batch_size = lyrics.shape[0]
+                
+                if latent_batch_size != condition_batch_size:
+                    print(f"   🔧 Adjusting batch sizes: latent={latent_batch_size}, condition={condition_batch_size}")
+                    # latent 배치 크기에 맞춰 조건 조정
+                    if latent_batch_size > condition_batch_size:
+                        repeat_factor = latent_batch_size // condition_batch_size
+                        lyrics = lyrics.repeat(repeat_factor, 1)
+                        lyrics_mask = lyrics_mask.repeat(repeat_factor, 1)
+                        captions = captions * repeat_factor
+                    else:
+                        # latent 배치 크기에 맞춰 잘라내기
+                        lyrics = lyrics[:latent_batch_size]
+                        lyrics_mask = lyrics_mask[:latent_batch_size]
+                        captions = captions[:latent_batch_size]
+                
                 with torch.no_grad():
                     loss_dict = generator.training_loss(
                         latents=target_latents_3d.float(),
@@ -437,12 +455,15 @@ class DCPipelineTester:
             
             # Generator로 생성 테스트
             try:
+                # 배치 크기 조정된 조건 사용
+                adjusted_batch_size = target_latents_3d.shape[0]
+                
                 with torch.no_grad():
                     generated_latents = generator.generate_fast(
                         shape=target_latents_3d.shape,
-                        lyrics=lyrics,
-                        lyrics_mask=lyrics_mask,
-                        captions=captions,
+                        lyrics=lyrics[:adjusted_batch_size] if lyrics.shape[0] > adjusted_batch_size else lyrics,
+                        lyrics_mask=lyrics_mask[:adjusted_batch_size] if lyrics_mask.shape[0] > adjusted_batch_size else lyrics_mask,
+                        captions=captions[:adjusted_batch_size] if len(captions) > adjusted_batch_size else captions,
                         task_type='SONG',
                         num_steps=10,
                         device=device

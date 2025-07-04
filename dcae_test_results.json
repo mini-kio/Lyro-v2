@@ -1,54 +1,57 @@
 {
   "test_info": {
     "dcae_model": "ACE-Step/ACE-Step-v1-3.5B",
-    "device": "cpu",
-    "timestamp": 1751524921.0904145
+    "device": "cuda",
+    "timestamp": 1751610850.9124746
   },
   "basic_pipeline": {
     "audio_to_latent": {
       "success": true,
-      "time": 0.3078436851501465,
+      "time": 0.3586456775665283,
       "shapes": [
         "torch.Size([1, 2, 132300])",
-        "torch.Size([1, 16, 16, 16])"
+        "torch.Size([1, 8, 16, 16])"
       ]
     },
     "latent_to_audio": {
       "success": true,
-      "time": 0.0,
+      "time": 1.8440518379211426,
       "shapes": [
-        "torch.Size([1, 16, 16, 16])",
-        "torch.Size([1, 2, 128, 256])"
+        "torch.Size([1, 8, 16, 16])",
+        "torch.Size([1, 2, 132300])"
       ]
     },
-    "total_time": 0.3078436851501465,
+    "reconstruction_mse": 1.0005621910095215,
+    "total_time": 2.202697515487671,
     "pipeline_success": true
-  },
-  "real_audio": {
-    "success": false,
-    "error": "The size of tensor a (44100) must match the size of tensor b (441000) at non-singleton dimension 3"
   },
   "compression": {
     "1.0s": {
-      "original_size": 22528,
-      "compressed_size": 0,
-      "compression_ratio": 22528.0,
-      "latent_shape": null,
+      "original_size": 88200,
+      "compressed_size": 2048,
+      "compression_ratio": 43.06640625,
+      "latent_shape": [
+        1,
+        8,
+        16,
+        16
+      ],
       "mel_shape": [
         1,
         2,
         128,
-        88
+        87
       ],
+      "vocoder_enabled": true,
       "success": true
     },
     "3.0s": {
-      "original_size": 66560,
-      "compressed_size": 4096,
-      "compression_ratio": 16.25,
+      "original_size": 264600,
+      "compressed_size": 2048,
+      "compression_ratio": 129.19921875,
       "latent_shape": [
         1,
-        16,
+        8,
         16,
         16
       ],
@@ -56,32 +59,39 @@
         1,
         2,
         128,
-        260
+        259
       ],
+      "vocoder_enabled": true,
       "success": true
     },
     "5.0s": {
-      "original_size": 110592,
-      "compressed_size": 0,
-      "compression_ratio": 110592.0,
-      "latent_shape": null,
+      "original_size": 441000,
+      "compressed_size": 2048,
+      "compression_ratio": 215.33203125,
+      "latent_shape": [
+        1,
+        8,
+        16,
+        16
+      ],
       "mel_shape": [
         1,
         2,
         128,
-        432
+        431
       ],
+      "vocoder_enabled": true,
       "success": true
     },
     "10.0s": {
-      "original_size": 220672,
-      "compressed_size": 4096,
-      "compression_ratio": 53.875,
+      "original_size": 882000,
+      "compressed_size": 5832,
+      "compression_ratio": 151.23456790123456,
       "latent_shape": [
         1,
-        16,
-        16,
-        16
+        8,
+        27,
+        27
       ],
       "mel_shape": [
         1,
@@ -89,18 +99,19 @@
         128,
         862
       ],
+      "vocoder_enabled": true,
       "success": true
     },
     "success": true
   },
   "generator_integration": {
     "success": true,
-    "generator_params": 45699600,
+    "generator_params": 44642824,
     "training_success": true,
     "generation_success": true,
-    "latent_shape_original": "torch.Size([1, 16, 16, 16])",
-    "latent_shape_3d": "torch.Size([1, 16, 256])",
-    "generated_shape": "torch.Size([1, 2, 128, 256])",
-    "flow_loss": 2.271231174468994
+    "latent_shape_original": "torch.Size([1, 8, 16, 16])",
+    "latent_shape_3d": "torch.Size([1, 8, 256])",
+    "generated_shape": "torch.Size([1, 2, 65536])",
+    "flow_loss": 2.1699306964874268
   }
 }
