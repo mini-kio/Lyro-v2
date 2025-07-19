@@ -1,11 +1,27 @@
-# lyro/models/sampling.py
-"""
-LYRO 샘플링 모듈: CFG + Euler Scheduler 통합
-"""
-
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Tuple, Optional, Callable
+
+
+class ReferenceEncoder(nn.Module):
+    def __init__(self, input_channels: int = 16, output_dim: int = 512):
+        super().__init__()
+        self.processor = nn.Sequential(
+            nn.Conv1d(input_channels, input_channels * 2, 3, padding=1),
+            nn.GELU(),
+            nn.Conv1d(input_channels * 2, input_channels * 4, 3, stride=2, padding=1),
+            nn.GELU(),
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(input_channels * 4, output_dim)
+        )
+    
+    def forward(self, reference: Optional[torch.Tensor]) -> torch.Tensor:
+        if reference is None:
+            device = next(self.parameters()).device
+            return torch.zeros(1, self.processor[-1].out_features, device=device)
+        return self.processor(reference)
 
 
 class CFG:

@@ -1,9 +1,3 @@
-# lyro/models/losses.py
-"""
-Generator Loss Functions for LYRO (수정됨 - Generator 전용)
-Flow Matching, Latent Consistency, Reconstruction losses for latent vectors
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,6 +6,69 @@ from typing import Dict, Optional, Tuple, List
 import warnings
 
 warnings.filterwarnings("ignore")
+
+
+class AlignmentLoss(nn.Module):
+    def __init__(self, weights: Dict[str, float] = None):
+        super().__init__()
+        
+        if weights is None:
+            weights = {
+                'alignment': 1.0,
+                'segment': 0.5,
+                'tts': 0.3,
+                'consistency': 0.2
+            }
+        
+        self.weights = weights
+        self.mse_loss = nn.MSELoss()
+        self.ce_loss = nn.CrossEntropyLoss()
+    
+    def forward(
+        self,
+        predictions: Dict[str, torch.Tensor],
+        targets: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        losses = {}
+        total_loss = 0.0
+        
+        if 'alignment_targets' in targets:
+            align_loss = self.mse_loss(
+                predictions['alignment_scores'],
+                targets['alignment_targets']
+            )
+            losses['alignment'] = align_loss
+            total_loss += self.weights['alignment'] * align_loss
+        
+        if 'segment_targets' in targets:
+            segment_loss = self.ce_loss(
+                predictions['segment_probs'].view(-1, 3),
+                targets['segment_targets'].view(-1).long()
+            )
+            losses['segment'] = segment_loss
+            total_loss += self.weights['segment'] * segment_loss
+        
+        if 'tts_targets' in targets and 'tts_conditions' in predictions:
+            tts_loss = self.mse_loss(
+                predictions['tts_conditions'],
+                targets['tts_targets']
+            )
+            losses['tts'] = tts_loss
+            total_loss += self.weights['tts'] * tts_loss
+        
+        if 'audio_features' in predictions and 'speech_features' in predictions:
+            audio_norm = F.normalize(predictions['audio_features'], dim=-1)
+            speech_norm = F.normalize(predictions['speech_features'], dim=-1)
+            
+            consistency_loss = 1 - F.cosine_similarity(
+                audio_norm, speech_norm, dim=-1
+            ).mean()
+            
+            losses['consistency'] = consistency_loss
+            total_loss += self.weights['consistency'] * consistency_loss
+        
+        losses['total'] = total_loss
+        return losses
 
 
 class FlowMatchingLoss(nn.Module):

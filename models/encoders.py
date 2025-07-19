@@ -1,45 +1,82 @@
-# lyro/models/encoders.py
-"""
-Condition Encoders for LYRO (수정됨 - Generator 전용)
-Lyrics, Caption (MusicCaps), and Reference Latent encoders
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 from transformers import AutoModel, AutoTokenizer
 import warnings
+import re
+import json
+import os
 
 warnings.filterwarnings("ignore")
 
 
-class LyricsEncoder(nn.Module):
+
+
+
+
+class UnifiedTextEncoder(nn.Module):
     """
-    Lyrics encoder with custom tokenizer and embedding
-    Handles variable length lyrics with attention pooling
+    통합 텍스트 인코더: 가사와 스타일을 분리 입력하되 내부에서 상호작용
+    
+    입력:
+    - lyrics: "[verse 1:piano] 가사 내용" (섹션 태그 + 가사)
+    - style: "energetic pop rock, upbeat" (장르, 분위기, 스타일)
+    
+    내부 처리: Cross-attention으로 lyrics ↔ style 상호작용
     """
     
     def __init__(
         self,
         vocab_size: int = 32000,
-        embed_dim: int = 512,
-        hidden_dim: int = 512,
-        num_layers: int = 6,
-        num_heads: int = 8,
-        max_length: int = 512,
-        dropout: float = 0.1
+        embed_dim: int = 768,
+        hidden_dim: int = 768,
+        num_layers: int = 8,
+        num_heads: int = 12,
+        max_lyrics_length: int = 256,
+        max_style_length: int = 128,
+        dropout: float = 0.1,
+        pretrained_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     ):
         super().__init__()
         
         self.embed_dim = embed_dim
-        self.max_length = max_length
+        self.max_lyrics_length = max_lyrics_length
+        self.max_style_length = max_style_length
+        self.total_max_length = max_lyrics_length + max_style_length
         
-        # Token embedding
+        # 동적 vocab 초기화
+        self.section_vocab = {}    # [verse], [chorus] 등
+        self.style_vocab = {}      # piano, pop, energetic 등 (악기+장르+분위기 통합)
+        self.max_section_types = 50
+        self.max_style_types = 200  # 더 많은 스타일 지원
+        
+        # 임베딩 레이어들
+        self.section_embedding = nn.Embedding(self.max_section_types, embed_dim // 4)
+        self.style_embedding = nn.Embedding(self.max_style_types, embed_dim // 4)
         self.token_embedding = nn.Embedding(vocab_size, embed_dim)
-        self.pos_embedding = nn.Parameter(torch.randn(1, max_length, embed_dim) * 0.02)
         
-        # Transformer encoder
+        # 위치 임베딩 (lyrics + style 구분)
+        self.lyrics_pos_embedding = nn.Parameter(torch.randn(1, max_lyrics_length, embed_dim) * 0.02)
+        self.style_pos_embedding = nn.Parameter(torch.randn(1, max_style_length, embed_dim) * 0.02)
+        
+        # 타입 임베딩 (lyrics vs style 구분)
+        self.type_embedding = nn.Embedding(2, embed_dim)  # 0: lyrics, 1: style
+        
+        # 사전 훈련된 텍스트 인코더 (fallback)
+        try:
+            self.pretrained_tokenizer = AutoTokenizer.from_pretrained(pretrained_model)
+            self.pretrained_encoder = AutoModel.from_pretrained(pretrained_model)
+            for param in self.pretrained_encoder.parameters():
+                param.requires_grad = False
+            self.has_pretrained = True
+            
+            pretrained_dim = self.pretrained_encoder.config.hidden_size
+            self.pretrained_proj = nn.Linear(pretrained_dim, embed_dim)
+        except:
+            self.has_pretrained = False
+            
+        # Cross-attention Transformer 인코더
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=num_heads,
@@ -49,425 +86,395 @@ class LyricsEncoder(nn.Module):
             batch_first=True,
             norm_first=True
         )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
         
-        self.transformer = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=num_layers
+        # 상호작용 레이어들
+        self.lyrics_style_cross_attention = nn.MultiheadAttention(
+            embed_dim, num_heads, dropout=dropout, batch_first=True
+        )
+        self.style_lyrics_cross_attention = nn.MultiheadAttention(
+            embed_dim, num_heads, dropout=dropout, batch_first=True
         )
         
-        # Output projection
-        self.output_proj = nn.Sequential(
-            nn.Linear(embed_dim, hidden_dim),
+        # 융합 레이어
+        self.fusion_layer = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim * 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, embed_dim),
+            nn.Linear(embed_dim * 2, embed_dim),
             nn.LayerNorm(embed_dim)
         )
         
-        # Attention pooling
-        self.attention_pool = nn.MultiheadAttention(
-            embed_dim, num_heads, dropout=dropout, batch_first=True
-        )
+        # 최종 출력 프로젝션
+        self.output_proj = nn.Linear(embed_dim, embed_dim)
+        
+        # 어텐션 풀링 (최종 임베딩 생성)
         self.pool_query = nn.Parameter(torch.randn(1, 1, embed_dim) * 0.02)
+        self.attention_pool = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
         
-    def forward(self, token_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def parse_lyrics(self, lyrics: str) -> Tuple[str, List[str], List[str]]:
         """
-        Args:
-            token_ids: (B, L) token IDs
-            attention_mask: (B, L) attention mask
-            
-        Returns:
-            (B, embed_dim) lyrics embedding
+        가사 파싱: 다중 태그 지원
+        
+        지원 형식:
+        - [verse 1:piano] content
+        - [chorus:guitar:energetic] content  
+        - [bridge] content
+        - [piano] content
+        - content (태그 없음)
         """
-        B, L = token_ids.shape
-        
-        # Truncate if too long
-        if L > self.max_length:
-            token_ids = token_ids[:, :self.max_length]
-            if attention_mask is not None:
-                attention_mask = attention_mask[:, :self.max_length]
-            L = self.max_length
+        if not lyrics or not lyrics.strip():
+            return "", [], []
             
-        # Token embedding
-        x = self.token_embedding(token_ids)  # (B, L, embed_dim)
+        # 패턴들 (우선순위 순)
+        patterns = [
+            r'\[([^:]+):([^:]+):([^]]+)\]\s*(.*)',  # [section:style:mood] content
+            r'\[([^:]+):([^]]+)\]\s*(.*)',          # [section:style] content
+            r'\[([^]]+)\]\s*(.*)',                  # [section or style] content
+        ]
         
-        # Add positional embedding
-        x = x + self.pos_embedding[:, :L, :]
+        sections = []
+        styles = []
+        content = lyrics.strip()
         
-        # Create attention mask for transformer
-        if attention_mask is not None:
-            # Convert to boolean mask (True = ignore)
-            mask = ~attention_mask.bool()
+        for pattern in patterns:
+            match = re.match(pattern, content)
+            if match:
+                groups = match.groups()
+                if len(groups) == 4:  # [a:b:c] content
+                    sections.append(groups[0].strip().lower())
+                    styles.extend([groups[1].strip().lower(), groups[2].strip().lower()])
+                    content = groups[3].strip()
+                elif len(groups) == 3:  # [a:b] content
+                    tag1, tag2 = groups[0].strip().lower(), groups[1].strip().lower()
+                    # 첫 번째는 섹션, 두 번째는 스타일로 분류
+                    sections.append(tag1)
+                    styles.append(tag2)
+                    content = groups[2].strip()
+                elif len(groups) == 2:  # [a] content
+                    tag = groups[0].strip().lower()
+                    # 섹션인지 스타일인지 판단 (기본적으로 섹션으로)
+                    if any(s in tag for s in ['verse', 'chorus', 'bridge', 'intro', 'outro', 'pre']):
+                        sections.append(tag)
+                    else:
+                        styles.append(tag)
+                    content = groups[1].strip()
+                break
+        
+        return content, sections, styles
+    
+    def parse_style(self, style: str) -> List[str]:
+        """
+        스타일 텍스트 파싱: 콤마/공백으로 분리된 스타일들
+        
+        예시: "energetic pop rock, upbeat tempo" → ["energetic", "pop", "rock", "upbeat", "tempo"]
+        """
+        if not style or not style.strip():
+            return []
+            
+        # 콤마로 분리 후 공백으로 재분리
+        styles = []
+        for part in style.split(','):
+            for word in part.strip().split():
+                word = word.strip().lower()
+                if word and word not in styles:  # 중복 제거
+                    styles.append(word)
+        
+        return styles
+    
+    def build_vocab_from_data(self, lyrics_list: List[str], style_list: List[str] = None):
+        """데이터셋에서 섹션과 스타일 vocab 구축"""
+        sections_found = set()
+        styles_found = set()
+        
+        # 가사에서 섹션과 스타일 추출
+        for lyrics in lyrics_list:
+            _, sections, styles = self.parse_lyrics(lyrics)
+            sections_found.update(sections)
+            styles_found.update(styles)
+        
+        # 스타일 텍스트에서 스타일 추출
+        if style_list:
+            for style in style_list:
+                styles = self.parse_style(style)
+                styles_found.update(styles)
+        
+        # vocab 구축 (기존 vocab과 병합)
+        for section in sections_found:
+            if section not in self.section_vocab:
+                new_idx = len(self.section_vocab)
+                if new_idx < self.max_section_types:
+                    self.section_vocab[section] = new_idx
+        
+        for style in styles_found:
+            if style not in self.style_vocab:
+                new_idx = len(self.style_vocab)
+                if new_idx < self.max_style_types:
+                    self.style_vocab[style] = new_idx
+        
+        print(f"Section vocab ({len(self.section_vocab)}): {list(self.section_vocab.keys())}")
+        print(f"Style vocab ({len(self.style_vocab)}): {list(self.style_vocab.keys())}")
+    
+    def save_vocab(self, vocab_path: str):
+        """vocab을 파일로 저장"""
+        vocab_data = {
+            'section_vocab': self.section_vocab,
+            'style_vocab': self.style_vocab
+        }
+        os.makedirs(os.path.dirname(vocab_path), exist_ok=True)
+        with open(vocab_path, 'w', encoding='utf-8') as f:
+            json.dump(vocab_data, f, ensure_ascii=False, indent=2)
+        print(f"Vocab saved to {vocab_path}")
+    
+    def load_vocab(self, vocab_path: str):
+        """파일에서 vocab 로드"""
+        if os.path.exists(vocab_path):
+            with open(vocab_path, 'r', encoding='utf-8') as f:
+                vocab_data = json.load(f)
+            
+            self.section_vocab = vocab_data.get('section_vocab', {})
+            self.style_vocab = vocab_data.get('style_vocab', {})
+            # 하위 호환성
+            if 'instrument_vocab' in vocab_data:
+                self.style_vocab.update(vocab_data['instrument_vocab'])
+            
+            print(f"Vocab loaded from {vocab_path}")
+            print(f"Section vocab ({len(self.section_vocab)}): {list(self.section_vocab.keys())}")
+            print(f"Style vocab ({len(self.style_vocab)}): {list(self.style_vocab.keys())}")
         else:
-            mask = None
-            
-        # Transformer encoding
-        x = self.transformer(x, src_key_padding_mask=mask)  # (B, L, embed_dim)
-        
-        # Output projection
-        x = self.output_proj(x)
-        
-        # Attention pooling
-        query = self.pool_query.expand(B, -1, -1)  # (B, 1, embed_dim)
-        pooled, _ = self.attention_pool(query, x, x, key_padding_mask=mask)
-        
-        return pooled.squeeze(1)  # (B, embed_dim)
-
-
-class CaptionEncoder(nn.Module):
-    """
-    Caption encoder using pretrained text encoder
-    Supports MusicCaps-style descriptions
-    """
+            print(f"Vocab file not found: {vocab_path}")
     
-    def __init__(
-        self,
-        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
-        output_dim: int = 768,
-        freeze_encoder: bool = True,
-        max_length: int = 256
-    ):
-        super().__init__()
-        
-        self.output_dim = output_dim
-        self.max_length = max_length
-        
-        try:
-            # Load pretrained model and tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-            self.encoder = AutoModel.from_pretrained(model_name)
-            
-            # Freeze encoder if specified
-            if freeze_encoder:
-                for param in self.encoder.parameters():
-                    param.requires_grad = False
-                    
-            # Get encoder output dimension
-            encoder_dim = self.encoder.config.hidden_size
-            
-            # Output projection
-            if encoder_dim != output_dim:
-                self.proj = nn.Sequential(
-                    nn.Linear(encoder_dim, output_dim * 2),
-                    nn.GELU(),
-                    nn.Dropout(0.1),
-                    nn.Linear(output_dim * 2, output_dim),
-                    nn.LayerNorm(output_dim)
-                )
-            else:
-                self.proj = nn.Identity()
-                
-        except Exception as e:
-            print(f"Warning: Failed to load pretrained encoder {model_name}: {e}")
-            print("Using fallback embedding layer")
-            
-            # Fallback to simple embedding
-            self.tokenizer = None
-            self.encoder = None
-            self.embedding = nn.Sequential(
-                nn.Embedding(50000, 512),  # Large vocab size
-                nn.TransformerEncoder(
-                    nn.TransformerEncoderLayer(512, 8, 2048, batch_first=True),
-                    num_layers=6
-                ),
-                nn.AdaptiveAvgPool1d(1),
-                nn.Linear(512, output_dim)
-            )
-            self.proj = nn.Identity()
-            
-    def encode_text(self, texts: list) -> torch.Tensor:
-        """Encode text using tokenizer"""
-        if self.tokenizer is None:
-            # Fallback: simple character encoding
-            max_len = min(self.max_length, 100)
-            batch_size = len(texts)
-            device = next(self.parameters()).device
-            
-            encoded = torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
-            
-            for i, text in enumerate(texts):
-                for j, char in enumerate(text[:max_len]):
-                    encoded[i, j] = ord(char) % 50000
-                    
-            return encoded
-        else:
-            # Use actual tokenizer
-            encoded = self.tokenizer(
-                texts,
-                padding=True,
-                truncation=True,
-                max_length=self.max_length,
-                return_tensors="pt"
-            )
-            return encoded
+    def get_vocab_stats(self) -> Dict[str, Any]:
+        """vocab 통계 반환"""
+        return {
+            'section_vocab_size': len(self.section_vocab),
+            'style_vocab_size': len(self.style_vocab),
+            'section_coverage': len(self.section_vocab) / self.max_section_types,
+            'style_coverage': len(self.style_vocab) / self.max_style_types,
+            'sections': list(self.section_vocab.keys()),
+            'styles': list(self.style_vocab.keys())
+        }
     
-    def forward(self, captions: list) -> torch.Tensor:
-        """
-        Args:
-            captions: List of caption strings
-            
-        Returns:
-            (B, output_dim) caption embeddings
-        """
-        if self.encoder is not None:
-            # Use pretrained encoder
-            encoded = self.encode_text(captions)
-            
-            # Move to correct device
-            device = next(self.parameters()).device
-            for key in encoded:
-                if isinstance(encoded[key], torch.Tensor):
-                    encoded[key] = encoded[key].to(device)
-            
-            # Encode
-            with torch.set_grad_enabled(not getattr(self.encoder, '_frozen', False)):
-                outputs = self.encoder(**encoded)
-                
-            # Mean pooling
-            embeddings = outputs.last_hidden_state
-            attention_mask = encoded.get('attention_mask', None)
-            
-            if attention_mask is not None:
-                # Masked mean pooling
-                mask_expanded = attention_mask.unsqueeze(-1).expand(embeddings.size()).float()
-                sum_embeddings = torch.sum(embeddings * mask_expanded, 1)
-                sum_mask = torch.clamp(mask_expanded.sum(1), min=1e-9)
-                embeddings = sum_embeddings / sum_mask
-            else:
-                embeddings = embeddings.mean(dim=1)
-                
-            # Project to output dimension
-            embeddings = self.proj(embeddings)
-            
-        else:
-            # Use fallback embedding
-            encoded = self.encode_text(captions)
-            embeddings = self.embedding(encoded)
-            if embeddings.dim() > 2:
-                embeddings = embeddings.mean(dim=1)
-                
-        return embeddings
-
-
-class ReferenceEncoder(nn.Module):
-    """
-    Reference latent encoder (수정됨 - DCAE 제거, latent 직접 처리)
-    Encodes reference latent vectors to condition generation
-    """
-    
-    def __init__(self, input_channels: int = 16, output_dim: int = 512):
-        super().__init__()
-        
-        self.input_channels = input_channels
-        self.output_dim = output_dim
-        
-        # Reference latent processing network
-        self.ref_processor = nn.Sequential(
-            # Latent processing layers
-            nn.Conv1d(input_channels, input_channels * 2, 3, padding=1),
-            nn.GELU(),
-            nn.Conv1d(input_channels * 2, input_channels * 4, 3, stride=2, padding=1),
-            nn.GELU(),
-            nn.Conv1d(input_channels * 4, input_channels * 8, 3, stride=2, padding=1),
-            nn.GELU(),
-            nn.AdaptiveAvgPool1d(1),
-            nn.Flatten(),
-            nn.Linear(input_channels * 8, output_dim * 2),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(output_dim * 2, output_dim),
-            nn.LayerNorm(output_dim)
-        )
-        
-        # Style transfer layers
-        self.style_layers = nn.ModuleList([
-            nn.Linear(output_dim, output_dim) for _ in range(3)
-        ])
-        
-    def forward(self, reference_latents: Optional[torch.Tensor]) -> torch.Tensor:
-        """
-        Args:
-            reference_latents: (B, C, T) reference latent vectors or None
-            
-        Returns:
-            (B, output_dim) reference embedding
-        """
-        if reference_latents is None:
-            # Return zero embedding
-            batch_size = 1
-            device = next(self.parameters()).device
-            return torch.zeros(batch_size, self.output_dim, device=device)
-            
-        batch_size = reference_latents.shape[0]
-        device = reference_latents.device
-        
-        try:
-            # Process reference latents
-            ref_embedding = self.ref_processor(reference_latents)
-            
-            # Apply style transformations
-            for layer in self.style_layers:
-                ref_embedding = ref_embedding + layer(F.gelu(ref_embedding))
-                
-            return ref_embedding
-            
-        except Exception as e:
-            print(f"Warning: Reference encoding failed: {e}")
-            # Return zero embedding on failure
-            return torch.zeros(batch_size, self.output_dim, device=device)
-            
-    def extract_style_features(self, reference_latents: torch.Tensor, num_features: int = 8) -> torch.Tensor:
-        """
-        Extract multiple style features from reference latents
-        
-        Args:
-            reference_latents: (B, C, T) reference latent vectors
-            num_features: Number of style features to extract
-            
-        Returns:
-            (B, num_features, output_dim) style features
-        """
-        batch_size = reference_latents.shape[0]
-        
-        # Segment latents into multiple parts
-        segment_length = reference_latents.shape[-1] // num_features
-        style_features = []
-        
-        for i in range(num_features):
-            start_idx = i * segment_length
-            end_idx = (i + 1) * segment_length if i < num_features - 1 else reference_latents.shape[-1]
-            
-            segment = reference_latents[..., start_idx:end_idx]
-            if segment.shape[-1] < 8:  # Too short
-                segment = F.pad(segment, (0, 8 - segment.shape[-1]))
-                
-            segment_feature = self.forward(segment)
-            style_features.append(segment_feature)
-            
-        return torch.stack(style_features, dim=1)  # (B, num_features, output_dim)
-
-
-class MultiModalEncoder(nn.Module):
-    """
-    Multi-modal encoder that combines all condition types (수정됨 - Reference latent 사용)
-    """
-    
-    def __init__(
-        self,
-        lyrics_encoder: LyricsEncoder,
-        caption_encoder: CaptionEncoder,
-        reference_encoder: ReferenceEncoder,
-        fusion_dim: int = 1024
-    ):
-        super().__init__()
-        
-        self.lyrics_encoder = lyrics_encoder
-        self.caption_encoder = caption_encoder
-        self.reference_encoder = reference_encoder
-        self.fusion_dim = fusion_dim
-        
-        # Get individual encoder output dimensions
-        lyrics_dim = lyrics_encoder.embed_dim
-        caption_dim = caption_encoder.output_dim
-        reference_dim = reference_encoder.output_dim
-        
-        # Cross-attention fusion
-        self.cross_attention = nn.MultiheadAttention(
-            embed_dim=fusion_dim,
-            num_heads=16,
-            batch_first=True
-        )
-        
-        # Individual projections to fusion dimension
-        self.lyrics_proj = nn.Linear(lyrics_dim, fusion_dim)
-        self.caption_proj = nn.Linear(caption_dim, fusion_dim)
-        self.reference_proj = nn.Linear(reference_dim, fusion_dim)
-        
-        # Final fusion layers
-        self.fusion_layers = nn.Sequential(
-            nn.Linear(fusion_dim * 3, fusion_dim * 2),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(fusion_dim * 2, fusion_dim),
-            nn.LayerNorm(fusion_dim)
-        )
-        
     def forward(
-        self,
-        lyrics_tokens: Optional[torch.Tensor] = None,
-        captions: Optional[list] = None,
-        reference_latents: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None
-    ) -> Dict[str, torch.Tensor]:
+        self, 
+        lyrics: Optional[List[str]] = None,
+        style: Optional[List[str]] = None,
+        token_ids: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """
-        Encode all modalities and return individual and fused embeddings
+        분리된 입력으로 상호작용하는 통합 인코딩
         
         Args:
-            lyrics_tokens: (B, L) lyrics token IDs
-            captions: List of caption strings
-            reference_latents: (B, C, T) reference latent vectors
-            attention_mask: (B, L) lyrics attention mask
+            lyrics: 가사 리스트 (섹션 태그 포함) - ["[verse 1:piano] 내용"]
+            style: 스타일 리스트 - ["energetic pop rock"]
+            token_ids: 선택적 토큰 ID
             
         Returns:
-            Dictionary containing individual and fused embeddings
+            (B, embed_dim) 통합 임베딩
         """
-        batch_size = (
-            lyrics_tokens.shape[0] if lyrics_tokens is not None else
-            len(captions) if captions is not None else
-            reference_latents.shape[0] if reference_latents is not None else 1
-        )
-        
         device = next(self.parameters()).device
         
-        # Encode each modality
-        embeddings = {}
-        
-        # Lyrics
-        if lyrics_tokens is not None:
-            lyrics_emb = self.lyrics_encoder(lyrics_tokens, attention_mask)
-            embeddings['lyrics'] = self.lyrics_proj(lyrics_emb)
+        # 배치 크기 결정
+        if lyrics is not None:
+            batch_size = len(lyrics)
+        elif style is not None:
+            batch_size = len(style)
         else:
-            embeddings['lyrics'] = torch.zeros(batch_size, self.fusion_dim, device=device)
+            raise ValueError("Either lyrics or style must be provided")
+        
+        # 기본값 설정
+        if lyrics is None:
+            lyrics = [""] * batch_size
+        if style is None:
+            style = [""] * batch_size
+        
+        # 1. 가사 처리
+        lyrics_embeddings = []
+        for i, lyric in enumerate(lyrics):
+            content, sections, lyric_styles = self.parse_lyrics(lyric)
             
-        # Captions
-        if captions is not None:
-            caption_emb = self.caption_encoder(captions)
-            embeddings['caption'] = self.caption_proj(caption_emb)
+            # 텍스트 인코딩
+            if self.has_pretrained and content.strip():
+                content_embed = self._encode_with_pretrained([content])[0]
+            else:
+                content_embed = torch.zeros(self.embed_dim, device=device)
+            
+            # 섹션 임베딩
+            section_embed = self._encode_sections(sections, device)
+            
+            # 가사 내 스타일 임베딩
+            lyric_style_embed = self._encode_styles(lyric_styles, device)
+            
+            # 가사 통합 임베딩
+            lyric_embed = content_embed + section_embed + lyric_style_embed
+            lyrics_embeddings.append(lyric_embed)
+        
+        lyrics_tensor = torch.stack(lyrics_embeddings)  # (B, embed_dim)
+        
+        # 2. 스타일 처리  
+        style_embeddings = []
+        for style_text in style:
+            parsed_styles = self.parse_style(style_text)
+            
+            # 스타일 텍스트 인코딩
+            if self.has_pretrained and style_text.strip():
+                style_content_embed = self._encode_with_pretrained([style_text])[0]
+            else:
+                style_content_embed = torch.zeros(self.embed_dim, device=device)
+            
+            # 스타일 태그 임베딩
+            style_tag_embed = self._encode_styles(parsed_styles, device)
+            
+            # 스타일 통합 임베딩
+            style_embed = style_content_embed + style_tag_embed
+            style_embeddings.append(style_embed)
+        
+        style_tensor = torch.stack(style_embeddings)  # (B, embed_dim)
+        
+        # 3. 위치 및 타입 임베딩 추가
+        lyrics_tensor = lyrics_tensor.unsqueeze(1)  # (B, 1, embed_dim)
+        style_tensor = style_tensor.unsqueeze(1)   # (B, 1, embed_dim)
+        
+        # 타입 임베딩 (lyrics vs style 구분)
+        lyrics_type = self.type_embedding(torch.zeros(batch_size, 1, dtype=torch.long, device=device))
+        style_type = self.type_embedding(torch.ones(batch_size, 1, dtype=torch.long, device=device))
+        
+        lyrics_tensor = lyrics_tensor + lyrics_type
+        style_tensor = style_tensor + style_type
+        
+        # 4. Cross-attention 상호작용
+        # Lyrics가 Style을 참고
+        lyrics_enhanced, _ = self.lyrics_style_cross_attention(
+            query=lyrics_tensor,
+            key=style_tensor,
+            value=style_tensor
+        )
+        
+        # Style이 Lyrics를 참고
+        style_enhanced, _ = self.style_lyrics_cross_attention(
+            query=style_tensor,
+            key=lyrics_tensor,
+            value=lyrics_tensor
+        )
+        
+        # 5. 융합
+        combined = torch.cat([
+            lyrics_enhanced.squeeze(1),  # (B, embed_dim)
+            style_enhanced.squeeze(1)    # (B, embed_dim)
+        ], dim=-1)  # (B, embed_dim * 2)
+        
+        fused = self.fusion_layer(combined)  # (B, embed_dim)
+        
+        # 6. 최종 어텐션 풀링
+        query = self.pool_query.expand(batch_size, -1, -1)  # (B, 1, embed_dim)
+        
+        # 전체 시퀀스로 어텐션 (lyrics + style)
+        full_sequence = torch.cat([lyrics_enhanced, style_enhanced], dim=1)  # (B, 2, embed_dim)
+        
+        final_embed, _ = self.attention_pool(query, full_sequence, full_sequence)
+        
+        return self.output_proj(final_embed.squeeze(1))  # (B, embed_dim)
+    
+    def _encode_sections(self, sections: List[str], device: torch.device) -> torch.Tensor:
+        """섹션 리스트를 임베딩으로 변환"""
+        if not sections:
+            return torch.zeros(self.embed_dim // 4, device=device)
+        
+        section_embeds = []
+        for section in sections:
+            if section in self.section_vocab:
+                idx = self.section_vocab[section]
+            else:
+                idx = 0  # unknown
+            section_embeds.append(self.section_embedding(torch.tensor(idx, device=device)))
+        
+        # 평균 또는 합계
+        if section_embeds:
+            combined = torch.stack(section_embeds).mean(dim=0)
+            # embed_dim // 4 → embed_dim으로 확장
+            expanded = torch.cat([combined, torch.zeros(self.embed_dim - self.embed_dim // 4, device=device)])
+            return expanded
         else:
-            embeddings['caption'] = torch.zeros(batch_size, self.fusion_dim, device=device)
-            
-        # Reference latents
-        if reference_latents is not None:
-            reference_emb = self.reference_encoder(reference_latents)
-            embeddings['reference'] = self.reference_proj(reference_emb)
+            return torch.zeros(self.embed_dim, device=device)
+    
+    def _encode_styles(self, styles: List[str], device: torch.device) -> torch.Tensor:
+        """스타일 리스트를 임베딩으로 변환"""
+        if not styles:
+            return torch.zeros(self.embed_dim // 4, device=device)
+        
+        style_embeds = []
+        for style in styles:
+            if style in self.style_vocab:
+                idx = self.style_vocab[style]
+            else:
+                idx = 0  # unknown
+            style_embeds.append(self.style_embedding(torch.tensor(idx, device=device)))
+        
+        # 평균 또는 합계
+        if style_embeds:
+            combined = torch.stack(style_embeds).mean(dim=0)
+            # embed_dim // 4 → embed_dim으로 확장
+            expanded = torch.cat([combined, torch.zeros(self.embed_dim - self.embed_dim // 4, device=device)])
+            return expanded
         else:
-            embeddings['reference'] = torch.zeros(batch_size, self.fusion_dim, device=device)
+            return torch.zeros(self.embed_dim, device=device)
+    
+    def _encode_with_tokens(self, token_ids: torch.Tensor) -> torch.Tensor:
+        """토큰 ID로 인코딩 (미사용 - 호환성 유지)"""
+        B, L = token_ids.shape
+        
+        if L > self.max_lyrics_length:
+            token_ids = token_ids[:, :self.max_lyrics_length]
+            L = self.max_lyrics_length
             
-        # Cross-modal attention fusion
-        all_embeddings = torch.stack([
-            embeddings['lyrics'],
-            embeddings['caption'], 
-            embeddings['reference']
-        ], dim=1)  # (B, 3, fusion_dim)
+        x = self.token_embedding(token_ids)
+        x = x + self.lyrics_pos_embedding[:, :L, :]
         
-        fused, _ = self.cross_attention(all_embeddings, all_embeddings, all_embeddings)
-        fused = fused.mean(dim=1)  # (B, fusion_dim)
+        x = self.transformer(x)
         
-        # Final fusion
-        concat_embeddings = torch.cat([
-            embeddings['lyrics'],
-            embeddings['caption'],
-            embeddings['reference']
-        ], dim=-1)  # (B, fusion_dim * 3)
+        # 평균 풀링
+        return x.mean(dim=1)
+    
+    def _encode_with_pretrained(self, texts: List[str]) -> torch.Tensor:
+        """사전 훈련된 모델로 인코딩"""
+        device = next(self.parameters()).device
         
-        final_embedding = self.fusion_layers(concat_embeddings)
+        # 토크나이징
+        encoded = self.pretrained_tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors='pt'
+        )
         
-        # Add residual connection with cross-attention result
-        final_embedding = final_embedding + fused
+        # GPU로 이동
+        for k, v in encoded.items():
+            encoded[k] = v.to(device)
         
-        return {
-            'lyrics': embeddings['lyrics'],
-            'caption': embeddings['caption'],
-            'reference': embeddings['reference'],
-            'fused': final_embedding
-        }
+        # 인코딩
+        with torch.no_grad():
+            outputs = self.pretrained_encoder(**encoded)
+            embeddings = outputs.last_hidden_state.mean(dim=1)  # 평균 풀링
+        
+        return self.pretrained_proj(embeddings)
+    
+    def _encode_basic(self, texts: List[str]) -> torch.Tensor:
+        """기본 인코딩 (간단한 문자 기반)"""
+        device = next(self.parameters()).device
+        batch_size = len(texts)
+        
+        # 간단한 문자 기반 토크나이징 (실제로는 더 정교한 토크나이저 필요)
+        max_len = min(self.max_length, max(len(text) for text in texts) if texts else 1)
+        
+        token_ids = torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
+        
+        for i, text in enumerate(texts):
+            for j, char in enumerate(text[:max_len]):
+                token_ids[i, j] = ord(char) % self.token_embedding.num_embeddings
+        
+        return self._encode_with_tokens(token_ids)
+
+
+
+

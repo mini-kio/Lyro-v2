@@ -1,165 +1,122 @@
-"""
-LYRO Models Package (수정됨 - Generator 전용)
-"""
+import torch
+import torch.nn as nn
+from typing import Dict, List, Optional, Any
 
-from .generator import LyroGenerator, GeneratorConfig, create_lyro_generator
-from .ssm_flow import SSMFlowGenerator, create_ssm_flow_generator
-from .encoders import CaptionEncoder, LyricsEncoder, ReferenceEncoder
-from .losses import (
-    FlowMatchingLoss, 
-    REPALoss, 
-    ReconstructionLoss, 
-    PerceptualLoss,
-    CombinedLoss
-)
-from .sampling import FlowMatchingSampler
+# Individual Components  
+from .generator import LyroGenerator, GeneratorConfig
+from .encoders import UnifiedTextEncoder
+from .sampling import FlowMatchingSampler, ReferenceEncoder
+from .losses import CombinedLoss, FlowMatchingLoss, AlignmentLoss
+
+
+class MultimodalLyroSystem(nn.Module):
+    def __init__(self, generator_config: GeneratorConfig = None):
+        super().__init__()
+        
+        if generator_config is None:
+            generator_config = GeneratorConfig()
+        
+        self.generator = LyroGenerator(generator_config)
+        self.text_encoder = UnifiedTextEncoder(
+            embed_dim=generator_config.d_model,
+            hidden_dim=generator_config.d_model
+        )
+    
+    def forward(
+        self,
+        lyrics: Optional[List[str]] = None,
+        style: Optional[List[str]] = None,
+        target_latents: Optional[torch.Tensor] = None
+    ) -> Dict[str, Any]:
+        if lyrics is not None or style is not None:
+            text_embed = self.text_encoder(lyrics=lyrics, style=style)
+        else:
+            device = next(self.parameters()).device
+            batch_size = target_latents.shape[0] if target_latents is not None else 1
+            text_embed = torch.zeros(batch_size, self.generator.config.d_model, device=device)
+        
+        if target_latents is not None:
+            loss_dict = self.generator.training_loss(target_latents, text_embed)
+            return {'loss': loss_dict['flow_loss'], 'text_embed': text_embed}
+        
+        return {'text_embed': text_embed}
+    
+    def generate_music(
+        self,
+        lyrics: Optional[List[str]] = None,
+        style: Optional[List[str]] = None,
+        num_steps: int = 50,
+        cfg_scale: float = 7.5
+    ) -> torch.Tensor:
+        self.eval()
+        with torch.no_grad():
+            if lyrics is not None or style is not None:
+                text_embed = self.text_encoder(lyrics=lyrics, style=style)
+            else:
+                device = next(self.parameters()).device
+                text_embed = torch.zeros(1, self.generator.config.d_model, device=device)
+            
+            shape = (text_embed.shape[0], self.generator.config.latent_channels, 
+                    self.generator.config.latent_time_steps)
+            
+            return self.generator.generate(shape, text_embed, None, num_steps, cfg_scale)
+    
+    def save_pretrained(self, save_directory: str):
+        import os
+        os.makedirs(save_directory, exist_ok=True)
+        torch.save(self.generator.state_dict(), f"{save_directory}/generator.pth")
+        torch.save(self.text_encoder.state_dict(), f"{save_directory}/text_encoder.pth")
+    
+    def load_pretrained(self, load_directory: str):
+        import os
+        if os.path.exists(f"{load_directory}/generator.pth"):
+            self.generator.load_state_dict(torch.load(f"{load_directory}/generator.pth"))
+        if os.path.exists(f"{load_directory}/text_encoder.pth"):
+            self.text_encoder.load_state_dict(torch.load(f"{load_directory}/text_encoder.pth"))
 
 __all__ = [
-    # Generator
+    'MultimodalLyroSystem',
     'LyroGenerator',
-    'GeneratorConfig',
-    'create_lyro_generator',
-    'SSMFlowGenerator',
-    'create_ssm_flow_generator',
-    
-    # Encoders
-    'CaptionEncoder',
-    'LyricsEncoder', 
-    'ReferenceEncoder',
-    
-    # Losses (Generator용)
-    'FlowMatchingLoss',
-    'REPALoss',
-    'ReconstructionLoss',
-    'PerceptualLoss',
-    'CombinedLoss',
-    
-    # Sampling
+    'GeneratorConfig', 
+    'UnifiedTextEncoder',
     'FlowMatchingSampler',
-    
-    # Factory functions
-    'create_lyro_models',
+    'ReferenceEncoder',
+    'CombinedLoss',
+    'FlowMatchingLoss',
+    'AlignmentLoss',
 ]
 
-
-def create_lyro_models(config):
-    """
-    LYRO 모델 스위트 생성 (수정됨: Generator 전용)
-    
-    Args:
-        config: 모델 설정
-        
-    Returns:
-        dict: 모델 딕셔너리
-    """
-    models = {}
-    
-    # Generator (SSM + Flow Matching, 훈련 대상)
-    models['generator'] = create_ssm_flow_generator(
-        latent_channels=config.generator.latent_channels,
-        latent_size=config.generator.latent_time_steps,
-        d_model=config.generator.d_model,
-        n_layers=config.generator.n_layers,
-        d_state=config.generator.d_state
-    )
-    
-    # 조건 인코더들
-    models['caption_encoder'] = CaptionEncoder(
-        model_name=config.encoder.caption_model,
-        output_dim=config.encoder.caption_embed_dim
-    )
-    
-    models['lyrics_encoder'] = LyricsEncoder(
-        vocab_size=config.encoder.lyrics_vocab_size,
-        embed_dim=config.encoder.lyrics_embed_dim,
-        max_length=config.encoder.max_lyrics_length
-    )
-    
-    models['reference_encoder'] = ReferenceEncoder(
-        input_channels=config.generator.latent_channels,
-        output_dim=config.encoder.reference_embed_dim
-    )
-    
-    return models
-
-
-def create_loss_functions(config):
-    """
-    Generator용 손실 함수 생성
-    
-    Args:
-        config: 손실 설정
-        
-    Returns:
-        CombinedLoss: 결합 손실 함수
-    """
-    
-    # 개별 손실 컴포넌트들
-    flow_loss = FlowMatchingLoss(
-        beta_schedule="cosine",
-        num_timesteps=1000
-    )
-    
-    repa_loss = REPALoss(
-        hubert_model=config.loss.hubert_model,
-        layer_weights=config.loss.hubert_layers
-    )
-    
-    recon_loss = ReconstructionLoss(
-        l1_weight=1.0,
-        l2_weight=0.1
-    )
-    
-    perceptual_loss = PerceptualLoss(
-        mel_weight=config.loss.mel_weight,
-        stft_weight=config.loss.stft_weight
-    )
-    
-    # 결합 손실
-    combined_loss = CombinedLoss(
-        flow_loss=flow_loss,
-        repa_loss=repa_loss,
-        recon_loss=recon_loss,
-        perceptual_loss=perceptual_loss,
-        weights={
-            'flow': config.loss.flow_matching_weight,
-            'repa': config.loss.repa_weight,
-            'recon': config.loss.reconstruction_weight,
-            'perceptual': config.loss.perceptual_weight
-        }
-    )
-    
-    return combined_loss
-
+def create_multimodal_system(generator_config: GeneratorConfig = None) -> MultimodalLyroSystem:
+    if generator_config is None:
+        generator_config = GeneratorConfig()
+    return MultimodalLyroSystem(generator_config)
 
 def get_model_info():
-    """모델 아키텍처 정보 (수정됨 - Generator 전용)"""
     return {
-        'ssm_generator': {
-            'parameters': '~1.5B', 
-            'architecture': 'S6 + Flow Matching',
-            'conditions': ['lyrics', 'captions', 'reference'],
-            'trainable': True,
-            'output_format': 'latent_vectors'
+        'version': '2.0 (Simplified)',
+        'total_parameters': '~400M',
+        'components': {
+            'generator': {
+                'parameters': '350M',
+                'architecture': 'SSM + Flow Matching',
+                'config': 'd_model=1024, n_layers=16, n_heads=16'
+            },
+            'text_encoder': {
+                'parameters': '~50M',
+                'architecture': 'Unified (Lyrics + Style)',
+                'features': ['Cross-attention', 'Multi-tag support']
+            }
         },
-        'encoders': {
-            'caption': 'Pretrained Text Encoder',
-            'lyrics': 'Custom Tokenizer + Embedding',
-            'reference': 'Latent-based'
-        },
-        'total_trainable_parameters': '~1.5B',
-        'pipeline': 'Text → Generator → Latent Vectors',
-        'audio_synthesis': 'External Vocoder Required'
+        'supported_tasks': ['SONG', 'INST'],
+        'output': 'Latent vectors (16 channels, 128 timesteps)'
     }
 
-
-def estimate_model_memory(config):
-    """모델 메모리 사용량 추정 (수정됨 - Generator 전용)"""
+def estimate_model_memory(batch_size: int = 4):
     memory_estimate = {
-        'generator': 3.0,     # GB (1.5B params in fp16)
-        'encoders': 0.3,      # GB
-        'training_overhead': 2.0,  # GB (gradients, optimizer states)
-        'batch_data': config.generator.batch_size * 0.2,  # GB per batch (latents only)
+        'generator': 0.8,        # GB (350M params in fp16)
+        'text_encoder': 0.1,     # GB (50M params)
+        'training_overhead': 1.5, # GB (gradients, optimizer states)
+        'batch_data': batch_size * 0.2,  # GB per batch
     }
     
     total_memory = sum(memory_estimate.values())
@@ -167,7 +124,21 @@ def estimate_model_memory(config):
     return {
         'breakdown': memory_estimate,
         'total_estimated': f"{total_memory:.1f} GB",
-        'recommended_gpu': "RTX 4090 (24GB)" if total_memory <= 24 else "H100 (80GB)",
-        'note': 'Estimates for Generator-only training with latent vectors',
-        'audio_synthesis': 'Requires external vocoder for audio generation'
+        'recommended_gpu': "RTX 3080 (12GB)" if total_memory <= 10 else "RTX 4090 (24GB)",
+        'batch_size': batch_size
+    }
+
+def get_system_capabilities():
+    return {
+        'text_processing': {
+            'lyric_sections': ['verse', 'chorus', 'bridge', 'intro', 'outro'],
+            'instruments': ['piano', 'guitar', 'synth', 'strings', 'drums'],
+            'moods': ['emotional', 'energetic', 'calm', 'dark', 'bright'],
+            'multi_tag_format': '[section:instrument:mood]',
+            'example': '[verse 1:piano:emotional] lyrics content'
+        },
+        'generation_modes': {
+            'SONG': 'Lyrics + style → music',
+            'INST': 'Style only → instrumental'
+        }
     }
