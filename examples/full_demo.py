@@ -14,7 +14,7 @@ from models import (
     MultimodalLyroSystem, GeneratorConfig, 
     get_model_info, estimate_model_memory, get_system_capabilities
 )
-from training.multimodal_trainer import MultimodalTrainer
+from training.trainer import MultimodalTrainer
 from training.config import LyroConfig
 from inference.pipeline import create_pipeline, quick_generate
 

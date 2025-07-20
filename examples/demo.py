@@ -12,7 +12,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.multimodal_lyro import MultimodalLyroSystem
 from models.generator import GeneratorConfig
-from training.multimodal_trainer import MultimodalTrainer
+from training.trainer import MultimodalTrainer
 from training.config import LyroConfig
 
 

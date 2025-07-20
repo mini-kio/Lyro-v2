@@ -13,7 +13,7 @@ __description__ = "Multimodal Music Generation with Audio-Lyrics Alignment"
 # from .models.generator import GeneratorConfig
 # from .models.encoders import UnifiedTextEncoder
 # from .models.alignment import AudioLyricsAligner
-# from .training.multimodal_trainer import MultimodalTrainer
+# from .training.trainer import MultimodalTrainer
 # from .training.config import LyroConfig
 
 # # Inference

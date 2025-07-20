@@ -219,8 +219,8 @@ if __name__ == "__main__":
     import sys
     
     if len(sys.argv) < 2:
-        print("Usage: python vocab_builder.py <dataset_path> [text_field]")
-        print("Example: python vocab_builder.py dataset/train.jsonl lyrics")
+        print("Usage: python vocabulary.py <dataset_path> [text_field]")
+        print("Example: python vocabulary.py dataset/train.jsonl lyrics")
         sys.exit(1)
     
     dataset_path = sys.argv[1]
