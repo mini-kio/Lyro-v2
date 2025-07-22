@@ -34,6 +34,7 @@ def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, si
 class RotaryPositionalEmbedding(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
+        self.dim = dim
         inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer('inv_freq', inv_freq)
     
@@ -41,7 +42,13 @@ class RotaryPositionalEmbedding(nn.Module):
         seq_len = x.shape[-2]
         t = torch.arange(seq_len, device=x.device, dtype=x.dtype)
         freqs = torch.outer(t, self.inv_freq)
-        return torch.cos(freqs), torch.sin(freqs)
+        cos_emb = torch.cos(freqs)
+        sin_emb = torch.sin(freqs)
+        # Ensure we have the right dimension
+        if cos_emb.shape[-1] < self.dim:
+            cos_emb = torch.cat([cos_emb, cos_emb], dim=-1)[:, :self.dim]
+            sin_emb = torch.cat([sin_emb, sin_emb], dim=-1)[:, :self.dim]
+        return cos_emb, sin_emb
 
 
 class S6Layer(nn.Module):
@@ -156,6 +163,9 @@ class ConditionProcessor(nn.Module):
             text_cond = torch.zeros(batch_size, self.text_proj.out_features, device=device)
         
         if reference is not None:
+            if reference.shape[0] != batch_size:
+                # Handle batch size mismatch
+                reference = reference[:batch_size] if reference.shape[0] > batch_size else reference.expand(batch_size, -1, -1)
             ref_cond = self.reference_proj(reference.flatten(1))
         else:
             ref_cond = torch.zeros(batch_size, self.reference_proj.out_features, device=device)

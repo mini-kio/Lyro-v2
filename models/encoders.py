@@ -378,7 +378,7 @@ class UnifiedTextEncoder(nn.Module):
     def _encode_sections(self, sections: List[str], device: torch.device) -> torch.Tensor:
         """섹션 리스트를 임베딩으로 변환"""
         if not sections:
-            return torch.zeros(self.embed_dim // 4, device=device)
+            return torch.zeros(self.embed_dim, device=device)
         
         section_embeds = []
         for section in sections:
@@ -392,7 +392,8 @@ class UnifiedTextEncoder(nn.Module):
         if section_embeds:
             combined = torch.stack(section_embeds).mean(dim=0)
             # embed_dim // 4 → embed_dim으로 확장
-            expanded = torch.cat([combined, torch.zeros(self.embed_dim - self.embed_dim // 4, device=device)])
+            pad_size = self.embed_dim - (self.embed_dim // 4)
+            expanded = torch.cat([combined, torch.zeros(pad_size, device=device)])
             return expanded
         else:
             return torch.zeros(self.embed_dim, device=device)
@@ -400,7 +401,7 @@ class UnifiedTextEncoder(nn.Module):
     def _encode_styles(self, styles: List[str], device: torch.device) -> torch.Tensor:
         """스타일 리스트를 임베딩으로 변환"""
         if not styles:
-            return torch.zeros(self.embed_dim // 4, device=device)
+            return torch.zeros(self.embed_dim, device=device)
         
         style_embeds = []
         for style in styles:
@@ -414,7 +415,8 @@ class UnifiedTextEncoder(nn.Module):
         if style_embeds:
             combined = torch.stack(style_embeds).mean(dim=0)
             # embed_dim // 4 → embed_dim으로 확장
-            expanded = torch.cat([combined, torch.zeros(self.embed_dim - self.embed_dim // 4, device=device)])
+            pad_size = self.embed_dim - (self.embed_dim // 4)
+            expanded = torch.cat([combined, torch.zeros(pad_size, device=device)])
             return expanded
         else:
             return torch.zeros(self.embed_dim, device=device)
@@ -444,7 +446,7 @@ class UnifiedTextEncoder(nn.Module):
             texts,
             padding=True,
             truncation=True,
-            max_length=self.max_length,
+            max_length=self.max_lyrics_length,
             return_tensors='pt'
         )
         
@@ -465,7 +467,7 @@ class UnifiedTextEncoder(nn.Module):
         batch_size = len(texts)
         
         # 간단한 문자 기반 토크나이징 (실제로는 더 정교한 토크나이저 필요)
-        max_len = min(self.max_length, max(len(text) for text in texts) if texts else 1)
+        max_len = min(self.max_lyrics_length, max(len(text) for text in texts) if texts else 1)
         
         token_ids = torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
         
