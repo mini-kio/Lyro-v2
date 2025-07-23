@@ -51,10 +51,14 @@ class UnifiedTextEncoder(nn.Module):
         self.max_section_types = 50
         self.max_style_types = 200  # 더 많은 스타일 지원
         
-        # 임베딩 레이어들
-        self.section_embedding = nn.Embedding(self.max_section_types, embed_dim // 4)
-        self.style_embedding = nn.Embedding(self.max_style_types, embed_dim // 4)
-        self.token_embedding = nn.Embedding(vocab_size, embed_dim)
+        # 임베딩 레이어들 - [PAD]=0, [UNK]=1로 분리
+        self.section_embedding = nn.Embedding(self.max_section_types + 2, embed_dim // 4, padding_idx=0)
+        self.style_embedding = nn.Embedding(self.max_style_types + 2, embed_dim // 4, padding_idx=0)
+        self.token_embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        
+        # 특수 토큰 인덱스
+        self.PAD_IDX = 0
+        self.UNK_IDX = 1
         
         # 위치 임베딩 (lyrics + style 구분)
         self.lyrics_pos_embedding = nn.Parameter(torch.randn(1, max_lyrics_length, embed_dim) * 0.02)
@@ -199,17 +203,25 @@ class UnifiedTextEncoder(nn.Module):
                 styles = self.parse_style(style)
                 styles_found.update(styles)
         
-        # vocab 구축 (기존 vocab과 병합)
+        # vocab 구축 (기존 vocab과 병합) - PAD=0, UNK=1 이후부터 시작
+        if not self.section_vocab:
+            self.section_vocab['[PAD]'] = self.PAD_IDX
+            self.section_vocab['[UNK]'] = self.UNK_IDX
+        
+        if not self.style_vocab:
+            self.style_vocab['[PAD]'] = self.PAD_IDX
+            self.style_vocab['[UNK]'] = self.UNK_IDX
+        
         for section in sections_found:
             if section not in self.section_vocab:
                 new_idx = len(self.section_vocab)
-                if new_idx < self.max_section_types:
+                if new_idx < self.max_section_types + 2:
                     self.section_vocab[section] = new_idx
         
         for style in styles_found:
             if style not in self.style_vocab:
                 new_idx = len(self.style_vocab)
-                if new_idx < self.max_style_types:
+                if new_idx < self.max_style_types + 2:
                     self.style_vocab[style] = new_idx
         
         print(f"Section vocab ({len(self.section_vocab)}): {list(self.section_vocab.keys())}")
@@ -238,11 +250,25 @@ class UnifiedTextEncoder(nn.Module):
             if 'instrument_vocab' in vocab_data:
                 self.style_vocab.update(vocab_data['instrument_vocab'])
             
+            # PAD, UNK 토큰 보장
+            if '[PAD]' not in self.section_vocab:
+                self.section_vocab['[PAD]'] = self.PAD_IDX
+            if '[UNK]' not in self.section_vocab:
+                self.section_vocab['[UNK]'] = self.UNK_IDX
+                
+            if '[PAD]' not in self.style_vocab:
+                self.style_vocab['[PAD]'] = self.PAD_IDX
+            if '[UNK]' not in self.style_vocab:
+                self.style_vocab['[UNK]'] = self.UNK_IDX
+            
             print(f"Vocab loaded from {vocab_path}")
             print(f"Section vocab ({len(self.section_vocab)}): {list(self.section_vocab.keys())}")
             print(f"Style vocab ({len(self.style_vocab)}): {list(self.style_vocab.keys())}")
         else:
             print(f"Vocab file not found: {vocab_path}")
+            # 기본 vocab 초기화
+            self.section_vocab = {'[PAD]': self.PAD_IDX, '[UNK]': self.UNK_IDX}
+            self.style_vocab = {'[PAD]': self.PAD_IDX, '[UNK]': self.UNK_IDX}
     
     def get_vocab_stats(self) -> Dict[str, Any]:
         """vocab 통계 반환"""
@@ -385,7 +411,7 @@ class UnifiedTextEncoder(nn.Module):
             if section in self.section_vocab:
                 idx = self.section_vocab[section]
             else:
-                idx = 0  # unknown
+                idx = self.UNK_IDX  # [UNK]=1 사용
             section_embeds.append(self.section_embedding(torch.tensor(idx, device=device)))
         
         # 평균 또는 합계
@@ -408,7 +434,7 @@ class UnifiedTextEncoder(nn.Module):
             if style in self.style_vocab:
                 idx = self.style_vocab[style]
             else:
-                idx = 0  # unknown
+                idx = self.UNK_IDX  # [UNK]=1 사용
             style_embeds.append(self.style_embedding(torch.tensor(idx, device=device)))
         
         # 평균 또는 합계

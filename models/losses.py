@@ -77,26 +77,38 @@ class FlowMatchingLoss(nn.Module):
     def __init__(
         self,
         beta_schedule: str = "cosine",
-        num_timesteps: int = 1000,
+        num_timesteps: int = None,
         sigma: float = 1e-4
     ):
         super().__init__()
         
         self.num_timesteps = num_timesteps
         self.sigma = sigma
+        self.beta_schedule = beta_schedule
         
-        # Create beta schedule
-        if beta_schedule == "linear":
+        if num_timesteps is not None:
+            self._create_beta_schedule(num_timesteps)
+        
+    def _create_beta_schedule(self, num_timesteps: int):
+        """Create beta schedule dynamically based on timesteps"""
+        self.num_timesteps = num_timesteps
+        
+        if self.beta_schedule == "linear":
             betas = torch.linspace(0.0001, 0.02, num_timesteps)
-        elif beta_schedule == "cosine":
+        elif self.beta_schedule == "cosine":
             steps = torch.arange(num_timesteps + 1) / num_timesteps
             alphas_cumprod = torch.cos((steps + 0.008) / 1.008 * np.pi / 2) ** 2
             betas = 1 - alphas_cumprod[1:] / alphas_cumprod[:-1]
             betas = torch.clamp(betas, 0.0001, 0.02)
         else:
-            raise ValueError(f"Unknown beta schedule: {beta_schedule}")
+            raise ValueError(f"Unknown beta schedule: {self.beta_schedule}")
             
         self.register_buffer('betas', betas)
+    
+    def sync_with_sampler_steps(self, sampler_steps: int):
+        """Synchronize beta schedule with sampler steps"""
+        if self.num_timesteps != sampler_steps:
+            self._create_beta_schedule(sampler_steps)
         
     def forward(
         self,
@@ -117,6 +129,9 @@ class FlowMatchingLoss(nn.Module):
         Returns:
             Flow matching loss
         """
+        if self.num_timesteps is None and hasattr(self, 'betas') and self.betas is not None:
+            self.num_timesteps = len(self.betas)
+        
         # Basic MSE loss
         loss = F.mse_loss(predicted_v, target_v, reduction='none')
         
@@ -127,10 +142,12 @@ class FlowMatchingLoss(nn.Module):
         else:
             loss = loss.mean()
             
-        # Time-dependent weighting
-        if t is not None:
-            # Weight loss based on time step
-            weight = 1.0 + 0.5 * torch.sin(np.pi * t.mean())
+        # Time-dependent weighting using beta schedule
+        if t is not None and hasattr(self, 'betas') and self.betas is not None:
+            # Map continuous t [0,1] to discrete timestep indices
+            t_indices = (t * (self.num_timesteps - 1)).long().clamp(0, self.num_timesteps - 1)
+            beta_weights = self.betas[t_indices]
+            weight = 1.0 + beta_weights.mean()
             loss = loss * weight
             
         return loss
@@ -290,23 +307,39 @@ class LatentPerceptualLoss(nn.Module):
         
         # Match lengths
         min_length = min(predicted.shape[-1], target.shape[-1])
-        if min_length < 8:
+        
+        # Enhanced skip logic for short sequences
+        if min_length < 16:  # Skip if too short for meaningful perceptual features
             return torch.tensor(0.0, device=device, requires_grad=True)
+        
+        # Progressive scaling for medium-length sequences
+        length_scale = 1.0
+        if min_length < 32:
+            length_scale = 0.5  # Reduce loss weight for medium sequences
+        elif min_length < 64:
+            length_scale = 0.75
             
         predicted = predicted[..., :min_length]
         target = target[..., :min_length]
         
         total_loss = 0.0
         
-        # Statistical features loss
-        stat_loss = self._compute_statistical_loss(predicted, target)
-        total_loss += self.stat_weight * stat_loss
+        # Statistical features loss (more robust for short sequences)
+        try:
+            stat_loss = self._compute_statistical_loss(predicted, target)
+            total_loss += self.stat_weight * stat_loss * length_scale
+        except Exception as e:
+            print(f"Statistical loss computation failed: {e}")
         
-        # Spectral features loss (FFT of latent vectors)
-        spectral_loss = self._compute_spectral_loss(predicted, target)
-        total_loss += self.spectral_weight * spectral_loss
+        # Spectral features loss (skip for very short sequences)
+        if min_length >= 32:  # Only compute spectral loss for longer sequences
+            try:
+                spectral_loss = self._compute_spectral_loss(predicted, target)
+                total_loss += self.spectral_weight * spectral_loss * length_scale
+            except Exception as e:
+                print(f"Spectral loss computation failed: {e}")
                     
-        return total_loss if total_loss > 0 else torch.tensor(0.1, device=device, requires_grad=True)
+        return total_loss if total_loss > 0 else torch.tensor(0.01, device=device, requires_grad=True)
     
     def _compute_statistical_loss(self, predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute loss based on statistical moments"""

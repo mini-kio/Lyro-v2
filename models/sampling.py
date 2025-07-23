@@ -114,7 +114,13 @@ class EulerSch:
             
         # dt 계산 (마지막 스텝은 t 자체)
         dt = self.t[idx] - self.t[idx + 1] if idx + 1 < self.steps else self.t[idx]
-        return x - alpha * dt * model_out
+        
+        # Ensure dt is scalar
+        if hasattr(dt, 'item'):
+            dt = dt.item()
+        
+        # Ensure all operations are on tensors
+        return x - alpha * float(dt) * model_out
 
 
 class FlowMatchingSampler:
@@ -180,11 +186,13 @@ class FlowMatchingSampler:
             t = torch.full((shape[0],), self.scheduler.t[i], device=device)
             
             # 조건부 예측
-            cond_pred = model(x, t, **conditions)
+            cond_output = model(x, t, **conditions)
+            cond_pred = cond_output[0] if isinstance(cond_output, tuple) else cond_output
             
             # 무조건 예측 (조건 제거)
             uncond_conditions = self._create_uncond_conditions(conditions)
-            uncond_pred = model(x, t, **uncond_conditions)
+            uncond_output = model(x, t, **uncond_conditions)
+            uncond_pred = uncond_output[0] if isinstance(uncond_output, tuple) else uncond_output
             
             # CFG 적용
             guided_pred = self.cfg.apply(cond_pred, uncond_pred, i, self.steps)

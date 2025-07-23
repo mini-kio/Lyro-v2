@@ -219,12 +219,15 @@ class AudioLyricsAligner(nn.Module):
         audio_length = audio.shape[-1]
         
         # 24kHz로 리샘플링 (필요시)
-        if audio_length / audio.shape[-2] != self.sample_rate:
-            resampler = torchaudio.transforms.Resample(
-                orig_freq=int(audio_length / audio.shape[-2]),
-                new_freq=self.sample_rate
-            )
-            audio = resampler(audio)
+        current_sample_rate = audio_length / (audio_length / self.sample_rate) if audio_length > 0 else self.sample_rate
+        if abs(current_sample_rate - self.sample_rate) > 1:  # 1Hz 허용 오차
+            original_freq = int(current_sample_rate)
+            if original_freq > 0:
+                resampler = torchaudio.transforms.Resample(
+                    orig_freq=original_freq,
+                    new_freq=self.sample_rate
+                )
+                audio = resampler(audio)
         
         with torch.no_grad():
             # MERT는 배치 처리가 어려울 수 있으므로 개별 처리

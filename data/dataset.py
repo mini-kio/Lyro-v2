@@ -423,6 +423,19 @@ class LyroDataset(Dataset):
                     print(f"Warning: Failed to load reference latents: {e}")
                     reference_latents = None
             
+            # 원본 오디오 로딩 (REPA용)
+            audio = None
+            if 'audio_path' in sample.get('metadata', {}):
+                try:
+                    audio_path = self.dataset_root / sample['metadata']['audio_path']
+                    if audio_path.exists():
+                        import torchaudio
+                        audio, _ = torchaudio.load(audio_path)
+                        if audio.shape[0] > 1:
+                            audio = audio.mean(dim=0, keepdim=True)
+                except Exception as e:
+                    print(f"Warning: Failed to load audio for REPA: {e}")
+            
             return {
                 # Latent data
                 'latents': latents,
@@ -440,6 +453,9 @@ class LyroDataset(Dataset):
                 # Raw text for encoder processing
                 'lyrics_text': sample['lyrics'] if task in ['SONG', 'COVER'] else '',
                 'caption_text': sample['caption'],
+                
+                # Audio for REPA
+                'audio': audio,
                 
                 # Task and metadata
                 'task': task,
@@ -469,6 +485,7 @@ class LyroDataset(Dataset):
                 'caption_length': 0,
                 'lyrics_text': '',
                 'caption_text': 'This is a music piece.',
+                'audio': None,
                 'task': 'INST',
                 'genre': ['unknown'],
                 'id': f'dummy_{idx}',
