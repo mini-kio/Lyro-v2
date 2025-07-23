@@ -36,7 +36,7 @@ class UnifiedTextEncoder(nn.Module):
         max_lyrics_length: int = 256,
         max_style_length: int = 128,
         dropout: float = 0.1,
-        pretrained_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+        pretrained_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     ):
         super().__init__()
         
