@@ -8,8 +8,46 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
+class TrainingScheduler:
+    """ACE-Step 스타일 훈련 스케줄러 - mHuBERT weight 동적 조정"""
+    
+    def __init__(self, total_steps: int = 100000, weight_decay_start: int = 90000):
+        """
+        Args:
+            total_steps: 총 훈련 스텝 수
+            weight_decay_start: mHuBERT weight 감소 시작 스텝 (마지막 10k 스텝)
+        """
+        self.total_steps = total_steps
+        self.weight_decay_start = weight_decay_start
+        self.initial_mhubert_weight = 1.0
+        self.final_mhubert_weight = 0.01  # ACE-Step처럼 0.01로 급감
+    
+    def get_mhubert_weight(self, current_step: int) -> float:
+        """현재 스텝에 따른 mHuBERT weight 반환"""
+        if current_step < self.weight_decay_start:
+            # 초반: 가사 정렬을 세게 (full weight)
+            return self.initial_mhubert_weight
+        else:
+            # 후반: 음악성을 살리며 균형 (exponential decay)
+            progress = (current_step - self.weight_decay_start) / (self.total_steps - self.weight_decay_start)
+            progress = min(progress, 1.0)
+            
+            # Exponential decay for rapid reduction
+            decay_factor = np.exp(-5 * progress)  # -5로 빠른 감소
+            weight = self.initial_mhubert_weight * decay_factor
+            
+            # Minimum weight 적용
+            return max(weight, self.final_mhubert_weight)
+    
+    def get_music_enhancement_weight(self, current_step: int) -> float:
+        """mHuBERT weight가 감소할 때 음악성 강화 weight 증가"""
+        mhubert_weight = self.get_mhubert_weight(current_step)
+        # mHuBERT weight가 줄어들수록 음악성 weight 증가
+        return 1.0 + (self.initial_mhubert_weight - mhubert_weight) * 0.5
+
+
 class AlignmentLoss(nn.Module):
-    def __init__(self, weights: Dict[str, float] = None):
+    def __init__(self, weights: Dict[str, float] = None, training_scheduler: TrainingScheduler = None):
         super().__init__()
         
         if weights is None:
@@ -17,20 +55,27 @@ class AlignmentLoss(nn.Module):
                 'alignment': 1.0,
                 'segment': 0.5,
                 'tts': 0.3,
-                'consistency': 0.2
+                'consistency': 0.2,
+                'mhubert_ssl': 1.0  # mHuBERT SSL loss weight
             }
         
         self.weights = weights
+        self.training_scheduler = training_scheduler or TrainingScheduler()
         self.mse_loss = nn.MSELoss()
         self.ce_loss = nn.CrossEntropyLoss()
     
     def forward(
         self,
         predictions: Dict[str, torch.Tensor],
-        targets: Dict[str, torch.Tensor]
+        targets: Dict[str, torch.Tensor],
+        current_step: int = 0
     ) -> Dict[str, torch.Tensor]:
         losses = {}
         total_loss = 0.0
+        
+        # Dynamic mHuBERT weight 계산
+        mhubert_weight = self.training_scheduler.get_mhubert_weight(current_step)
+        music_weight = self.training_scheduler.get_music_enhancement_weight(current_step)
         
         if 'alignment_targets' in targets:
             align_loss = self.mse_loss(
@@ -56,6 +101,16 @@ class AlignmentLoss(nn.Module):
             losses['tts'] = tts_loss
             total_loss += self.weights['tts'] * tts_loss
         
+        # mHuBERT SSL Loss with dynamic weighting
+        if 'speech_features' in predictions and 'mhubert_targets' in targets:
+            mhubert_ssl_loss = self.mse_loss(
+                predictions['speech_features'],
+                targets['mhubert_targets']
+            )
+            losses['mhubert_ssl'] = mhubert_ssl_loss
+            # 동적 weight 적용: 초반에는 세게, 후반에는 약하게
+            total_loss += self.weights['mhubert_ssl'] * mhubert_weight * mhubert_ssl_loss
+        
         if 'audio_features' in predictions and 'speech_features' in predictions:
             audio_norm = F.normalize(predictions['audio_features'], dim=-1)
             speech_norm = F.normalize(predictions['speech_features'], dim=-1)
@@ -65,8 +120,12 @@ class AlignmentLoss(nn.Module):
             ).mean()
             
             losses['consistency'] = consistency_loss
-            total_loss += self.weights['consistency'] * consistency_loss
+            # 음악성 강화 weight 적용
+            total_loss += self.weights['consistency'] * music_weight * consistency_loss
         
+        # 추가 정보 저장
+        losses['mhubert_weight'] = torch.tensor(mhubert_weight)
+        losses['music_weight'] = torch.tensor(music_weight)
         losses['total'] = total_loss
         return losses
 

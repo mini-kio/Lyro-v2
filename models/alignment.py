@@ -57,6 +57,10 @@ class AudioLyricsAligner(nn.Module):
             self.mert_model = AutoModel.from_pretrained(mert_model)
             self.mert_model.eval()
             
+            # MERT 파라미터 frozen
+            for param in self.mert_model.parameters():
+                param.requires_grad = False
+            
             # MERT 출력 차원 확인
             self.mert_dim = self.mert_model.config.hidden_size  # 1024
             self.mert_available = True
@@ -74,6 +78,10 @@ class AudioLyricsAligner(nn.Module):
             self.mhubert_processor = AutoProcessor.from_pretrained(mhubert_model)
             self.mhubert_model = AutoModel.from_pretrained(mhubert_model)
             self.mhubert_model.eval()
+            
+            # mHuBERT 파라미터 frozen
+            for param in self.mhubert_model.parameters():
+                param.requires_grad = False
             
             # mHuBERT 출력 차원 확인  
             self.mhubert_dim = self.mhubert_model.config.hidden_size  # 768

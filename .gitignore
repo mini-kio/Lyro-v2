@@ -1,0 +1,257 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyTorch
+*.pth
+*.pt
+*.bin
+*.safetensors
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# Model checkpoints and weights
+checkpoints/
+models/*.pth
+models/*.pt
+models/*.bin
+models/*.safetensors
+*.ckpt
+*.model
+*.weights
+
+# Audio files
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.ogg
+*.aac
+
+# Dataset files
+data/
+dataset/
+datasets/
+*.csv
+*.json
+*.jsonl
+
+# Logs
+logs/
+*.log
+*.out
+*.err
+
+# Wandb
+wandb/
+
+# Tensorboard
+runs/
+tb_logs/
+
+# Cache
+.cache/
+cache/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Windows
+*.lnk
+
+# Linux
+*~
+
+# DCAE Vocoder specific
+dcae_vocoder/checkpoints/
+dcae_vocoder/logs/
+dcae_vocoder/samples/
+dcae_vocoder/*.pth
+dcae_vocoder/*.pt
+
+# Inference outputs
+outputs/
+generated/
+samples/
+
+# Configuration files with secrets
+config/secrets.yaml
+config/api_keys.json
+*.key
+*.secret
+
+# Large model files
+*.bin
+*.safetensors
+*.h5
+
+# Experiment results
+results/
+experiments/
+eval_results/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Unit test
+.tox/
+.nox/
+.coverage
+.pytest_cache/
+pytest.ini
+setup.cfg
+tox.ini
+
+# Documentation builds
+docs/_build/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff (if using)
+*.log
+local_settings.py
+db.sqlite3
+
+# Flask stuff (if using)
+instance/
+.webassets-cache
+
+# Scrapy stuff (if using)
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Custom additions for Lyro v2
+# Training artifacts
+training_logs/
+model_outputs/
+alignment_cache/
+repa_features/
+
+# Audio processing cache
+audio_cache/
+spectrograms/
+mel_cache/
+
+# Evaluation outputs
+eval_outputs/
+test_results/
+benchmark_results/
+
+# User-specific configs
+user_config.yaml
+local_config.json
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Compressed files
+*.zip
+*.tar.gz
+*.rar
+*.7z

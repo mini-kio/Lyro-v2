@@ -238,14 +238,12 @@ class LyroGenerator(nn.Module):
         self.final_norm = nn.LayerNorm(config.d_model)
         self.output_proj = nn.Linear(config.d_model, config.latent_channels)
         
-        # REPA 관련 추가
+        # REPA 관련 추가 (ACE-Step 스타일)
         self.enable_repa = True
         self.repa_layer_idx = 7  # 8번째 레이어
-        self.repa_projection = nn.Linear(config.d_model, 1024)
+        self.repa_proj = nn.Linear(config.d_model, 1024)  # 1×1 conv 대신 Linear
         
-        # 모델들 (lazy loading)
-        self._mert_model = None
-        self._wav2vec2_model = None
+        # REPA 관련 설정만 유지
         
         self.apply(self._init_weights)
         
@@ -297,201 +295,105 @@ class LyroGenerator(nn.Module):
             nn.init.zeros_(module.bias)
             nn.init.ones_(module.weight)
     
-    def _get_mert_model(self):
-        """MERT 모델 lazy loading"""
-        if self._mert_model is None:
-            try:
-                from transformers import AutoModel
-                self._mert_model = AutoModel.from_pretrained("m-a-p/MERT-v1-330M")
-                self._mert_model.eval()
-                for param in self._mert_model.parameters():
-                    param.requires_grad = False
-            except Exception as e:
-                print(f"Warning: MERT model not available: {e}")
-                self.enable_repa = False
-        return self._mert_model
     
-    def _get_wav2vec2_model(self):
-        """wav2vec2-xls-r-300m 모델 lazy loading"""
-        if self._wav2vec2_model is None:
-            try:
-                from transformers import AutoModel
-                self._wav2vec2_model = AutoModel.from_pretrained("facebook/wav2vec2-xls-r-300m")
-                self._wav2vec2_model.eval()
-                for param in self._wav2vec2_model.parameters():
-                    param.requires_grad = False
-            except Exception as e:
-                print(f"Warning: wav2vec2 model not available: {e}")
-                self.enable_repa = False
-        return self._wav2vec2_model
     
-    def _extract_audio_features(
-        self, 
-        audio_batch: torch.Tensor, 
-        model: nn.Module, 
-        target_sr: int = 16000,
-        target_dim: int = 1024
-    ) -> Optional[torch.Tensor]:
-        """오디오 feature 추출 (배치 패딩 처리로 GPU 효율화)"""
-        if model is None:
-            return None
-            
-        device = audio_batch.device
-        batch_size = audio_batch.shape[0]
+    def temporal_align(self, features_list):
+        """ACE-Step 스타일 temporal alignment with nearest+lowpass"""
+        if not features_list or len(features_list) == 0:
+            return []
         
-        try:
-            model.to(device)
-            
-            with torch.no_grad():
-                # 배치 전처리 - 모노로 변환 및 길이 통일
-                processed_batch = []
-                max_length = 0
-                
-                for i in range(batch_size):
-                    audio = audio_batch[i]
-                    
-                    # 모노로 변환
-                    if audio.dim() > 1:
-                        audio = audio.mean(dim=0)
-                    
-                    # 빈 오디오 처리
-                    if audio.numel() == 0:
-                        audio = torch.zeros(target_sr, device=device)  # 1초 기본값
-                    
-                    processed_batch.append(audio)
-                    max_length = max(max_length, audio.shape[0])
-                
-                # 패딩으로 배치 생성
-                padded_batch = torch.zeros(batch_size, max_length, device=device)
-                attention_mask = torch.zeros(batch_size, max_length, device=device)
-                
-                for i, audio in enumerate(processed_batch):
-                    length = audio.shape[0]
-                    padded_batch[i, :length] = audio
-                    attention_mask[i, :length] = 1.0
-                
-                try:
-                    # 배치 단위로 모델 실행
-                    outputs = model(padded_batch)
-                    
-                    if hasattr(outputs, 'last_hidden_state'):
-                        features = outputs.last_hidden_state  # (B, T, D)
-                    else:
-                        features = outputs[0] if isinstance(outputs, tuple) else outputs
-                    
-                    # 어텐션 마스크 적용하여 평균 계산
-                    if features.dim() == 3:  # (B, T, D)
-                        # 마스크된 평균 계산
-                        mask_expanded = attention_mask.unsqueeze(-1).expand_as(features)
-                        masked_features = features * mask_expanded
-                        lengths = attention_mask.sum(dim=1, keepdim=True).clamp(min=1)
-                        features = masked_features.sum(dim=1) / lengths  # (B, D)
-                    elif features.dim() == 2:  # (B, D)
-                        pass  # 이미 올바른 형태
-                    else:
-                        features = features.mean(dim=1)
-                    
-                    # 차원 맞춤
-                    if features.shape[-1] != target_dim:
-                        if features.shape[-1] < target_dim:
-                            pad_size = target_dim - features.shape[-1]
-                            features = F.pad(features, (0, pad_size))
-                        else:
-                            features = features[..., :target_dim]
-                    
-                    return features  # (B, target_dim)
-                    
-                except Exception as e:
-                    print(f"Batch model inference failed: {e}, falling back to individual processing")
-                    # Fallback to individual processing
-                    return self._extract_audio_features_individual(audio_batch, model, target_sr, target_dim)
-            
-        except Exception as e:
-            print(f"Batch feature extraction failed: {e}")
-            return None
-    
-    def _extract_audio_features_individual(
-        self, 
-        audio_batch: torch.Tensor, 
-        model: nn.Module, 
-        target_sr: int = 16000,
-        target_dim: int = 1024
-    ) -> Optional[torch.Tensor]:
-        """개별 오디오 처리 (fallback)"""
-        device = audio_batch.device
-        batch_size = audio_batch.shape[0]
-        features_list = []
+        max_time_steps = max(feat.shape[1] for feat in features_list if feat is not None)
         
-        with torch.no_grad():
-            for i in range(batch_size):
-                audio = audio_batch[i]
+        aligned_features = []
+        for feat in features_list:
+            if feat is None:
+                aligned_features.append(None)
+                continue
                 
-                # 오디오 전처리
-                if audio.dim() > 1:
-                    audio = audio.mean(dim=0)  # 모노로 변환
+            B, T, D = feat.shape
+            if T == max_time_steps:
+                aligned_features.append(feat)
+            else:
+                feat_permuted = feat.permute(0, 2, 1)  # (B, D, T)
                 
-                # 모델 입력
-                if audio.numel() == 0:
-                    features_list.append(torch.zeros(1, target_dim, device=device))
-                    continue
-                
-                try:
-                    outputs = model(audio.unsqueeze(0))
-                    if hasattr(outputs, 'last_hidden_state'):
-                        feat = outputs.last_hidden_state.mean(dim=1)  # (1, D)
+                if T < max_time_steps:  # 업샘플링
+                    # nearest + low-pass
+                    feat_nearest = F.interpolate(feat_permuted, size=max_time_steps, mode='nearest')
+                    
+                    # Gaussian smoothing
+                    kernel_size = min(5, max_time_steps // T)
+                    if kernel_size > 1 and kernel_size % 2 == 0:
+                        kernel_size += 1
+                    
+                    if kernel_size > 1:
+                        sigma = kernel_size / 6.0
+                        x = torch.arange(kernel_size, device=feat.device, dtype=feat.dtype)
+                        x = x - kernel_size // 2
+                        kernel = torch.exp(-0.5 * (x / sigma) ** 2)
+                        kernel = kernel / kernel.sum()
+                        kernel = kernel.view(1, 1, -1).expand(D, 1, -1)
+                        
+                        feat_aligned = F.conv1d(feat_nearest, kernel, padding=kernel_size//2, groups=D)
                     else:
-                        feat = outputs[0].mean(dim=1) if isinstance(outputs, tuple) else outputs.mean(dim=1)
-                    
-                    # 차원 맞춤
-                    if feat.shape[-1] != target_dim:
-                        if feat.shape[-1] < target_dim:
-                            pad_size = target_dim - feat.shape[-1]
-                            feat = F.pad(feat, (0, pad_size))
-                        else:
-                            feat = feat[..., :target_dim]
-                    
-                    features_list.append(feat)
-                    
-                except Exception as e:
-                    print(f"Feature extraction failed for sample {i}: {e}")
-                    features_list.append(torch.zeros(1, target_dim, device=device))
+                        feat_aligned = feat_nearest
+                else:  # 다운샘플링
+                    feat_aligned = F.interpolate(feat_permuted, size=max_time_steps, mode='linear', align_corners=False)
+                
+                feat_aligned = feat_aligned.permute(0, 2, 1)
+                aligned_features.append(feat_aligned)
         
-        return torch.cat(features_list, dim=0)  # (B, target_dim)
-    
+        return aligned_features
+
     def compute_repa_loss(
         self, 
         repa_features: torch.Tensor, 
-        training_audio: torch.Tensor
+        alignment_features: tuple = None,
+        current_step: int = 0
     ) -> torch.Tensor:
-        """REPA loss 계산 (wav2vec2 사용)"""
-        if not self.enable_repa or repa_features is None or training_audio is None:
+        """
+        ACE-Step 스타일 REPA loss 계산
+        MERT(음악) + mHuBERT(가사) 두 표현을 동시에 맞춰 
+        "가사 명료도 ↑ + 음악성 보존"을 노림
+        """
+        if not self.enable_repa or repa_features is None:
             return torch.tensor(0.0, device=repa_features.device if repa_features is not None else 'cpu')
+        
+        if alignment_features is None or len(alignment_features) != 2:
+            return torch.tensor(0.0, device=repa_features.device)
+        
+        h_mert, h_mhubert = alignment_features
+        if h_mert is None and h_mhubert is None:
+            return torch.tensor(0.0, device=repa_features.device)
         
         device = repa_features.device
         
         try:
-            # MERT features
-            mert_model = self._get_mert_model()
-            mert_features = self._extract_audio_features(
-                training_audio, mert_model, target_sr=24000, target_dim=1024
-            )
+            # ACE-Step 스타일 dynamic weight 계산
+            from ..models.losses import TrainingScheduler
+            training_scheduler = TrainingScheduler()
+            mhubert_weight = training_scheduler.get_mhubert_weight(current_step)
+            mert_weight = 1.0  # MERT는 상시 1.0 유지
             
-            # wav2vec2 features
-            wav2vec2_model = self._get_wav2vec2_model()
-            wav2vec2_features = self._extract_audio_features(
-                training_audio, wav2vec2_model, target_sr=16000, target_dim=1024
-            )
+            # 3) h_mert, h_mhubert를 각각 75Hz→T′, 50Hz→T′로 선형보간
+            h_dit = repa_features  # (B, T, 1024)
+            h_dit, h_mert_aligned, h_mhubert_aligned = self.temporal_align([h_dit, h_mert, h_mhubert])
             
-            # 코사인 유사도 loss 계산
             total_loss = torch.tensor(0.0, device=device)
             
-            if mert_features is not None:
-                mert_similarity = F.cosine_similarity(repa_features, mert_features, dim=-1)
-                total_loss += 1 - mert_similarity.mean()
+            # 4) 프레임별 cos sim 평균
+            if h_mert_aligned is not None:
+                h_dit_norm = F.normalize(h_dit, dim=-1, eps=1e-6)
+                h_mert_norm = F.normalize(h_mert_aligned, dim=-1, eps=1e-6)
+                mert_similarity = F.cosine_similarity(h_dit_norm, h_mert_norm, dim=-1)
+                mert_loss = 1 - mert_similarity.mean()
+                total_loss += mert_weight * mert_loss
             
-            if wav2vec2_features is not None:
-                wav2vec2_similarity = F.cosine_similarity(repa_features, wav2vec2_features, dim=-1)
-                total_loss += 0.5 * (1 - wav2vec2_similarity.mean())  # 0.5 가중치
+            if h_mhubert_aligned is not None:
+                h_dit_norm = F.normalize(h_dit, dim=-1, eps=1e-6)
+                h_mhubert_norm = F.normalize(h_mhubert_aligned, dim=-1, eps=1e-6)
+                mhubert_similarity = F.cosine_similarity(h_dit_norm, h_mhubert_norm, dim=-1)
+                mhubert_loss = 1 - mhubert_similarity.mean()
+                total_loss += mhubert_weight * mhubert_loss
             
             return total_loss
             
@@ -504,8 +406,7 @@ class LyroGenerator(nn.Module):
         latents: torch.Tensor,
         timesteps: torch.Tensor,
         text_embed: Optional[torch.Tensor] = None,
-        reference: Optional[torch.Tensor] = None,
-        training_audio: Optional[torch.Tensor] = None
+        reference: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         batch_size = latents.shape[0]
         
@@ -528,12 +429,14 @@ class LyroGenerator(nn.Module):
         for i, layer in enumerate(self.layers):
             x = layer(x)
             
-            # REPA features 추출 (훈련 시에만)
+            # REPA features 추출 (훈련 시에만) - ACE-Step 스타일
             if (i == self.repa_layer_idx and 
                 self.training and 
-                training_audio is not None and 
                 self.enable_repa):
-                repa_features = self.repa_projection(x.mean(dim=1))
+                # 1) repa_layer의 hidden states: (B, T, d_model)
+                h_dit = x  # (B, T, d_model)
+                # 2) 1×1 conv or linear로 1024차원 투영
+                repa_features = self.repa_proj(h_dit)  # (B, T, 1024)
         
         x = self.final_norm(x)
         x = self.output_proj(x)
@@ -562,17 +465,16 @@ class LyroGenerator(nn.Module):
         latents: torch.Tensor,
         text_embed: Optional[torch.Tensor] = None,
         reference: Optional[torch.Tensor] = None,
-        training_audio: Optional[torch.Tensor] = None
+        alignment_features: Optional[tuple] = None,
+        current_step: int = 0
     ) -> Dict[str, torch.Tensor]:
         batch_size = latents.shape[0]
         device = latents.device
         
         t = torch.rand(batch_size, device=device)
         
-        # 입력 기반 결정적 노이즈 생성 (fallback 시)
-        if training_audio is not None:
-            noise = self._create_deterministic_noise(latents.shape, training_audio)
-        elif text_embed is not None:
+        # 입력 기반 결정적 노이즈 생성
+        if text_embed is not None:
             noise = self._create_deterministic_noise(latents.shape, text_embed)
         elif reference is not None:
             noise = self._create_deterministic_noise(latents.shape, reference)
@@ -584,14 +486,16 @@ class LyroGenerator(nn.Module):
         xt = (1 - t_expanded) * noise + t_expanded * latents
         target_v = latents - noise
         
-        predicted_v, repa_features = self.forward(xt, t, text_embed, reference, training_audio)
-        flow_loss = F.mse_loss(predicted_v, target_v)
-        repa_loss = self.compute_repa_loss(repa_features, training_audio)
+        predicted_v, repa_features = self.forward(xt, t, text_embed, reference)
+        flow_loss = F.mse_loss(predicted_v, target_v) * 50.0  # Flow≈1e-2 -> 스케일 조정
+        repa_loss = self.compute_repa_loss(repa_features, alignment_features, current_step)
+        
+        total_loss = flow_loss + repa_loss
         
         return {
             'flow_loss': flow_loss,
             'repa_loss': repa_loss,
-            'total_loss': flow_loss + repa_loss
+            'total_loss': total_loss
         }
     
     @torch.no_grad()

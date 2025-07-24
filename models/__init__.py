@@ -41,7 +41,8 @@ class MultimodalLyroSystem(nn.Module):
         lyrics: Optional[List[str]] = None,
         style: Optional[List[str]] = None,
         target_latents: Optional[torch.Tensor] = None,
-        audio: Optional[torch.Tensor] = None  # REPA + DCAE용
+        audio: Optional[torch.Tensor] = None,  # REPA + DCAE용
+        current_step: int = 0  # mHuBERT weight 조정용
     ) -> Dict[str, Any]:
         # Text encoding
         if lyrics is not None or style is not None:
@@ -58,7 +59,8 @@ class MultimodalLyroSystem(nn.Module):
             loss_dict = self.generator.training_loss(
                 latents=target_latents,
                 text_embed=text_embed,
-                training_audio=audio  # REPA를 위해 전달
+                training_audio=audio,  # REPA를 위해 전달
+                current_step=current_step  # mHuBERT weight 조정용
             )
             results.update(loss_dict)
         

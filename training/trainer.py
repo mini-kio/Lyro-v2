@@ -16,6 +16,7 @@ import os
 
 from ..models.multimodal_lyro import MultimodalLyroSystem
 from ..models.generator import GeneratorConfig
+from ..models.losses import TrainingScheduler
 from .config import LyroConfig
 
 
@@ -72,6 +73,10 @@ class MultimodalTrainer:
         self.global_step = 0
         self.current_epoch = 0
         self.best_loss = float('inf')
+        
+        # Training scheduler placeholder (실제 데이터로더에서 초기화)
+        self.training_scheduler = None
+        self._scheduler_initialized = False
         
         # 로깅
         self.use_wandb = config.training.use_wandb
@@ -153,6 +158,23 @@ class MultimodalTrainer:
         """전체 파라미터 수 계산"""
         return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
     
+    def _initialize_scheduler_with_dataloader(self, train_loader: DataLoader, num_epochs: int):
+        """실제 데이터로더 기반으로 스케줄러 초기화"""
+        if not self._scheduler_initialized:
+            actual_total_steps = len(train_loader) * num_epochs
+            
+            self.training_scheduler = TrainingScheduler(
+                total_steps=actual_total_steps,
+                weight_decay_start=int(actual_total_steps * 0.9)
+            )
+            
+            self._scheduler_initialized = True
+            
+            print(f"📊 Scheduler initialized:")
+            print(f"  - Total steps: {actual_total_steps}")
+            print(f"  - Weight decay starts at step: {self.training_scheduler.weight_decay_start}")
+            print(f"  - Decay duration: {actual_total_steps - self.training_scheduler.weight_decay_start} steps")
+    
     def train_stage(
         self,
         stage: str,  # 'pre-training', 'alignment', 'joint', 'fine-tuning'
@@ -165,6 +187,9 @@ class MultimodalTrainer:
         
         if num_epochs is None:
             num_epochs = self.config.generator.epochs
+        
+        # 실제 데이터로더 기반으로 스케줄러 초기화
+        self._initialize_scheduler_with_dataloader(train_loader, num_epochs)
         
         print(f"\n🚀 Starting '{stage}' training for {num_epochs} epochs...")
         
@@ -239,11 +264,12 @@ class MultimodalTrainer:
                 return_tts=True
             )
             
-            # 손실 계산
+            # 손실 계산 (current_step 전달)
             losses = self.model.compute_losses(
                 predictions=results,
                 targets=batch,
-                training_stage=self._get_training_stage_name(stage)
+                training_stage=self._get_training_stage_name(stage),
+                current_step=self.global_step
             )
             
             total_loss_batch = losses['total']
@@ -261,10 +287,12 @@ class MultimodalTrainer:
                         loss_components[key] = 0.0
                     loss_components[key] += value.item()
             
-            # 진행률 업데이트
+            # 진행률 업데이트 (mHuBERT weight 포함)
+            current_mhubert_weight = self.training_scheduler.get_mhubert_weight(self.global_step)
             progress_bar.set_postfix({
                 'loss': f"{total_loss_batch.item():.4f}",
-                'avg_loss': f"{total_loss / num_batches:.4f}"
+                'avg_loss': f"{total_loss / num_batches:.4f}",
+                'mhub_w': f"{current_mhubert_weight:.3f}"
             })
             
             self.global_step += 1
@@ -304,7 +332,8 @@ class MultimodalTrainer:
                 losses = self.model.compute_losses(
                     predictions=results,
                     targets=batch,
-                    training_stage=self._get_training_stage_name(stage)
+                    training_stage=self._get_training_stage_name(stage),
+                    current_step=self.global_step
                 )
                 
                 total_loss += losses['total'].item()

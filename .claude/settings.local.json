@@ -9,7 +9,8 @@
       "Bash(ls:*)",
       "Bash(cp:*)",
       "Bash(chcp:*)",
-      "Bash(set PYTHONIOENCODING=utf-8)"
+      "Bash(set PYTHONIOENCODING=utf-8)",
+      "Bash(git restore:*)"
     ],
     "deny": []
   }
