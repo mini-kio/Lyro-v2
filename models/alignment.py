@@ -155,13 +155,7 @@ class AudioLyricsAligner(nn.Module):
             nn.Dropout(0.1)
         )
         
-        # Cross-modal attention (오디오 ↔ 음성)
-        self.cross_attention = nn.MultiheadAttention(
-            embed_dim=self.alignment_dim,
-            num_heads=8,
-            dropout=0.1,
-            batch_first=True
-        )
+        # Simple concatenation instead of cross-attention
         
         # 시간축 정렬 네트워크
         self.alignment_lstm = nn.LSTM(
@@ -173,41 +167,14 @@ class AudioLyricsAligner(nn.Module):
             dropout=0.1
         )
         
-        # 정렬 점수 계산
-        self.alignment_scorer = nn.Sequential(
-            nn.Linear(self.alignment_dim * 2, self.alignment_dim),
-            nn.ReLU(),
-            nn.Linear(self.alignment_dim, 1),
-            nn.Sigmoid()
-        )
-        
-        # 세그먼트 분류기 (가사 구간 vs 악기 구간)
-        self.segment_classifier = nn.Sequential(
-            nn.Linear(self.alignment_dim * 2, self.alignment_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(self.alignment_dim, 3),  # [lyrics, instrumental, silence]
-            nn.Softmax(dim=-1)
-        )
+        # Removed alignment scorer and segment classifier
+        # These will be handled by REPA Loss during training
     
     def _build_tts_integration(self):
-        """TTS 통합 레이어 (기존 TTS 보조 학습 유지)"""
+        """Simplified TTS integration - basic feature projection only"""
         
-        # TTS 조건 생성 (정렬된 가사를 TTS 입력으로)
-        self.tts_condition_generator = nn.Sequential(
-            nn.Linear(self.alignment_dim * 2, 512),
-            nn.ReLU(),
-            nn.Linear(512, 256),  # TTS 조건 차원
-            nn.LayerNorm(256)
-        )
-        
-        # TTS 손실 가중치 (정렬 품질에 따라 동적 조정)
-        self.tts_weight_predictor = nn.Sequential(
-            nn.Linear(self.alignment_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 1),
-            nn.Sigmoid()
-        )
+        # Simple feature projection for TTS compatibility
+        self.tts_feature_proj = nn.Linear(self.alignment_dim * 2, 256)
     
     def encode_audio_mert(self, audio: torch.Tensor) -> torch.Tensor:
         """MERT로 오디오 인코딩"""
@@ -345,158 +312,43 @@ class AudioLyricsAligner(nn.Module):
         audio_proj = self.audio_proj(audio_features)     # (B, T, alignment_dim)
         speech_proj = self.speech_proj(speech_features)   # (B, T, alignment_dim)
         
-        # 3. Cross-modal attention
-        # 오디오가 음성을 참고
-        audio_enhanced, audio_attn = self.cross_attention(
-            query=audio_proj,
-            key=speech_proj, 
-            value=speech_proj
-        )
-        
-        # 4. 융합 및 정렬
-        fused_features = torch.cat([audio_enhanced, speech_proj], dim=-1)  # (B, T, 2*alignment_dim)
+        # 3. Simple concatenation fusion
+        fused_features = torch.cat([audio_proj, speech_proj], dim=-1)  # (B, T, 2*alignment_dim)
         
         # LSTM으로 시퀀스 모델링
         lstm_out, _ = self.alignment_lstm(fused_features)  # (B, T, 2*alignment_dim)
         
-        # 5. 정렬 점수 및 세그먼트 분류
-        alignment_scores = self.alignment_scorer(lstm_out).squeeze(-1)  # (B, T)
-        segment_probs = self.segment_classifier(lstm_out)  # (B, T, 3)
-        
-        # 6. TTS 통합
-        tts_conditions = self.tts_condition_generator(lstm_out)  # (B, T, 256)
-        tts_weights = self.tts_weight_predictor(audio_enhanced).squeeze(-1)  # (B, T)
+        # 5. Simple TTS feature projection
+        tts_features = self.tts_feature_proj(lstm_out)  # (B, T, 256)
         
         results = {
             'audio_features': audio_features,
             'speech_features': speech_features,
-            'alignment_scores': alignment_scores,
-            'segment_probs': segment_probs,  # [lyrics, instrumental, silence]
-            'tts_conditions': tts_conditions,
-            'tts_weights': tts_weights,
-            'cross_attention': audio_attn
+            'fused_features': lstm_out,  # For REPA Loss
+            'tts_features': tts_features
         }
         
-        # 7. 정렬 수행 (요청시)
+        # 7. 정렬 수행 (요청시) - Simplified
         if return_alignment and lyrics_timestamps is not None:
-            alignments = self.align_lyrics_to_audio(
-                alignment_scores, segment_probs, lyrics_timestamps
-            )
-            results['alignments'] = alignments
+            # Basic timestamp mapping based on feature frames
+            results['timestamps'] = lyrics_timestamps
         
         return results
     
-    def align_lyrics_to_audio(
-        self,
-        alignment_scores: torch.Tensor,
-        segment_probs: torch.Tensor, 
-        lyrics_timestamps: List[Tuple[float, float, str]]
-    ) -> List[Dict]:
-        """가사를 오디오에 정렬"""
-        
-        batch_size = alignment_scores.shape[0]
-        results = []
-        
-        for b in range(batch_size):
-            scores = alignment_scores[b].cpu().numpy()
-            segments = segment_probs[b].cpu().numpy()
-            
-            # 가사 구간 탐지 (lyrics probability > 0.5)
-            lyrics_mask = segments[:, 0] > 0.5  # lyrics class
-            
-            # 정렬 점수가 높은 구간 찾기
-            high_align_mask = scores > np.percentile(scores, 75)
-            
-            # 두 조건을 모두 만족하는 구간
-            candidate_mask = lyrics_mask & high_align_mask
-            
-            # 연속 구간 찾기
-            aligned_segments = []
-            in_segment = False
-            start_frame = 0
-            
-            for frame in range(len(candidate_mask)):
-                if candidate_mask[frame] and not in_segment:
-                    # 새 세그먼트 시작
-                    start_frame = frame
-                    in_segment = True
-                elif not candidate_mask[frame] and in_segment:
-                    # 세그먼트 종료
-                    end_frame = frame
-                    
-                    start_time = start_frame / self.feature_rate
-                    end_time = end_frame / self.feature_rate
-                    confidence = scores[start_frame:end_frame].mean()
-                    
-                    aligned_segments.append({
-                        'start_time': start_time,
-                        'end_time': end_time,
-                        'start_frame': start_frame,
-                        'end_frame': end_frame,
-                        'confidence': confidence
-                    })
-                    
-                    in_segment = False
-            
-            # 마지막 세그먼트 처리
-            if in_segment:
-                end_frame = len(candidate_mask)
-                start_time = start_frame / self.feature_rate
-                end_time = end_frame / self.feature_rate
-                confidence = scores[start_frame:end_frame].mean()
-                
-                aligned_segments.append({
-                    'start_time': start_time,
-                    'end_time': end_time, 
-                    'start_frame': start_frame,
-                    'end_frame': end_frame,
-                    'confidence': confidence
-                })
-            
-            results.append({
-                'segments': aligned_segments,
-                'lyrics_mask': lyrics_mask,
-                'alignment_scores': scores
-            })
-        
-        return results
+    def get_feature_frames_for_timestamp(self, timestamp: float) -> int:
+        """Convert timestamp to feature frame index"""
+        return min(int(timestamp * self.feature_rate), self.max_audio_frames - 1)
     
-    def get_tts_training_data(
+    def get_tts_features(
         self,
-        alignment_results: Dict[str, torch.Tensor],
-        lyrics_text: List[str]
-    ) -> Dict[str, torch.Tensor]:
-        """TTS 훈련을 위한 데이터 준비"""
+        alignment_results: Dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+        """Get TTS-compatible features from alignment results"""
         
-        tts_conditions = alignment_results['tts_conditions']  # (B, T, 256)
-        tts_weights = alignment_results['tts_weights']        # (B, T)
-        segment_probs = alignment_results['segment_probs']    # (B, T, 3)
+        tts_features = alignment_results['tts_features']  # (B, T, 256)
         
-        # 가사 구간만 추출
-        lyrics_mask = segment_probs[:, :, 0] > 0.5  # lyrics class
-        
-        # 가중 평균으로 TTS 조건 생성
-        weighted_conditions = []
-        for b in range(tts_conditions.shape[0]):
-            mask = lyrics_mask[b]
-            if mask.any():
-                weights = tts_weights[b][mask]
-                conditions = tts_conditions[b][mask]
-                
-                # 가중 평균
-                weighted_condition = (conditions * weights.unsqueeze(-1)).sum(dim=0) / weights.sum()
-            else:
-                # 가사 구간이 없으면 전체 평균
-                weighted_condition = tts_conditions[b].mean(dim=0)
-            
-            weighted_conditions.append(weighted_condition)
-        
-        return {
-            'tts_conditions': torch.stack(weighted_conditions),  # (B, 256)
-            'tts_weights': tts_weights,
-            'lyrics_masks': lyrics_mask,
-            'lyrics_text': lyrics_text
-        }
+        # Simple temporal pooling
+        return tts_features.mean(dim=1)  # (B, 256)
 
 
 
@@ -530,4 +382,4 @@ if __name__ == "__main__":
         else:
             print(f"  {key}: {type(value)}")
     
-    print("✅ AudioLyricsAligner test completed!")
+    print("AudioLyricsAligner test completed!")
